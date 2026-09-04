@@ -39,11 +39,16 @@ type AgentID string
 type TopicID string
 type MessageID string
 type PurgeRunID string
+type ServerInstanceID string
 
 func NewAgentID() (AgentID, error)       { v, e := newID("agt_"); return AgentID(v), e }
 func NewTopicID() (TopicID, error)       { v, e := newID("top_"); return TopicID(v), e }
 func NewMessageID() (MessageID, error)   { v, e := newID("msg_"); return MessageID(v), e }
 func NewPurgeRunID() (PurgeRunID, error) { v, e := newID("prg_"); return PurgeRunID(v), e }
+func NewServerInstanceID() (ServerInstanceID, error) {
+	v, e := newID("srv_")
+	return ServerInstanceID(v), e
+}
 
 func ParseAgentID(v string) (AgentID, error) {
 	if err := validateID(v, "agt_"); err != nil {

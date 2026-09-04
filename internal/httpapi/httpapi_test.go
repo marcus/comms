@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcus/comms/internal/app"
 	"github.com/marcus/comms/internal/domain"
@@ -27,7 +29,7 @@ func TestEveryGeneratedHTTPRouteIsMounted(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	for _, operation := range help.Operations() {
-		if operation.HTTP == nil {
+		if operation.HTTP == nil || operation.UnixOnly {
 			continue
 		}
 		t.Run(operation.ID, func(t *testing.T) {
@@ -116,5 +118,162 @@ func TestUnknownRoutesAndMethodsUseJSONErrors(t *testing.T) {
 				t.Fatalf("error=%#v", envelope.Error)
 			}
 		})
+	}
+}
+
+type stubLifecycle struct {
+	status    LifecycleStatus
+	err       error
+	mu        sync.Mutex
+	shutdowns []string
+}
+
+func (s *stubLifecycle) Status() LifecycleStatus { return s.status }
+
+func (s *stubLifecycle) RequestShutdown(expectedID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.shutdowns = append(s.shutdowns, expectedID)
+	return s.err
+}
+
+func (s *stubLifecycle) shutdownCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.shutdowns...)
+}
+
+func testService(t *testing.T) *app.Service {
+	t.Helper()
+	adapter, err := store.Open(context.Background(), store.Options{Path: filepath.Join(t.TempDir(), "comms.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close() })
+	return app.NewService(adapter, domain.UTCClock{})
+}
+
+func TestTCPHandlerDoesNotExposeShutdown(t *testing.T) {
+	life := &stubLifecycle{status: LifecycleStatus{ServerInstanceID: "srv_live"}}
+	handlers := []struct {
+		name    string
+		handler http.Handler
+	}{
+		{name: "default", handler: NewHandler(testService(t))},
+		{name: "tcp", handler: NewTCPHandler(testService(t), life)},
+	}
+	for _, test := range handlers {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/v1/admin/shutdown", strings.NewReader(`{"server_instance_id":"srv_live"}`))
+			request.Header.Set("Content-Type", "application/json")
+			test.handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var envelope ErrorEnvelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Code != "not_found" {
+				t.Fatalf("error=%#v", envelope.Error)
+			}
+			if calls := life.shutdownCalls(); len(calls) != 0 {
+				t.Fatalf("shutdown invoked on TCP handler: %v", calls)
+			}
+		})
+	}
+}
+
+func TestUnixHandlerHandshakeAndConditionalShutdown(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Minute)
+	life := &stubLifecycle{status: LifecycleStatus{
+		ServerInstanceID: "srv_liveinstance0000000000001",
+		PID:              4242,
+		StartedAt:        started,
+		LaunchMode:       "foreground",
+		Version:          "test-version",
+		Commit:           "abc1234",
+		SocketPath:       "/tmp/comms.sock",
+		DatabasePath:     "/tmp/comms.db",
+	}}
+	handler := NewUnixHandler(testService(t), life)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/hello", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("hello status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var hello struct {
+		Schema string         `json:"schema"`
+		Data   help.Handshake `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &hello); err != nil {
+		t.Fatal(err)
+	}
+	if hello.Schema != help.ResponseSchema {
+		t.Fatalf("schema=%q", hello.Schema)
+	}
+	if hello.Data.ServerInstanceID != life.status.ServerInstanceID || hello.Data.PID != 4242 || hello.Data.LaunchMode != "foreground" {
+		t.Fatalf("handshake=%#v", hello.Data)
+	}
+	if hello.Data.Commit != "abc1234" || hello.Data.SocketPath != "/tmp/comms.sock" || hello.Data.DatabasePath != "/tmp/comms.db" {
+		t.Fatalf("handshake paths=%#v", hello.Data)
+	}
+	if hello.Data.StoreID == "" || hello.Data.ProtocolVersion != app.ProtocolVersion {
+		t.Fatalf("store handshake=%#v", hello.Data)
+	}
+	if !hello.Data.StartedAt.Equal(started) {
+		t.Fatalf("started_at=%v", hello.Data.StartedAt)
+	}
+
+	for _, test := range []struct {
+		name, body, code string
+		status           int
+	}{
+		{name: "missing body", body: `{}`, status: http.StatusBadRequest, code: "invalid_argument"},
+		{name: "invalid json", body: `{`, status: http.StatusBadRequest, code: "invalid_argument"},
+		{name: "stale", body: `{"server_instance_id":"srv_stale"}`, status: http.StatusConflict, code: "server_instance_changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/admin/shutdown", strings.NewReader(test.body))
+			req.Header.Set("Content-Type", "application/json")
+			handler.ServeHTTP(rec, req)
+			if rec.Code != test.status {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var envelope ErrorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Code != test.code {
+				t.Fatalf("error=%#v", envelope.Error)
+			}
+		})
+	}
+	if calls := life.shutdownCalls(); len(calls) != 0 {
+		t.Fatalf("failed shutdowns still signaled: %v", calls)
+	}
+
+	accepted := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/shutdown", strings.NewReader(`{"server_instance_id":"srv_liveinstance0000000000001"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(accepted, req)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	var envelope struct {
+		Schema string                `json:"schema"`
+		Data   help.ShutdownAccepted `json:"data"`
+	}
+	if err := json.Unmarshal(accepted.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Schema != help.ResponseSchema || !envelope.Data.Accepted || envelope.Data.ServerInstanceID != life.status.ServerInstanceID {
+		t.Fatalf("accepted=%#v", envelope)
+	}
+	if calls := life.shutdownCalls(); len(calls) != 1 || calls[0] != life.status.ServerInstanceID {
+		t.Fatalf("shutdown calls=%v", calls)
 	}
 }

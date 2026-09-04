@@ -24,6 +24,7 @@ func TestRun(t *testing.T) {
 		{name: "hello requires service", args: []string{"hello"}, wantCode: 5, wantStderr: "Start the service with 'comms serve'."},
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "comms dev (unknown)\n"},
 		{name: "unknown", args: []string{"nope"}, wantCode: 2, wantStderr: "unknown command \"nope\""},
+		{name: "serve exclusive launch flags", args: []string{"serve", "--daemon-child", "--supervised"}, wantCode: 2, wantStderr: "mutually exclusive"},
 	}
 
 	for _, tt := range tests {

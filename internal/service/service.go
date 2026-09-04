@@ -18,12 +18,15 @@ import (
 	"github.com/marcus/comms/internal/store"
 )
 
+const shutdownTimeout = 10 * time.Second
+
 type Config struct {
 	DatabasePath string
 	SocketPath   string
 	Listen       string
 	ReadPoolSize int
 	WriterQueue  int
+	LaunchMode   LaunchMode
 }
 
 func ResolveSocketPath(create bool) (string, error) {
@@ -52,6 +55,15 @@ func ResolveSocketPath(create bool) (string, error) {
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	cfg, err := resolveConfig(cfg)
+	if err != nil {
+		return err
+	}
+	life, err := newController(cfg)
+	if err != nil {
+		return err
+	}
+
 	adapter, err := store.Open(ctx, store.Options{Path: cfg.DatabasePath, ReadConnections: cfg.ReadPoolSize, QueueDepth: cfg.WriterQueue})
 	if err != nil {
 		return err
@@ -59,7 +71,13 @@ func Run(ctx context.Context, cfg Config) error {
 	defer func() { _ = adapter.Close() }()
 
 	application := app.NewService(adapter, domain.UTCClock{})
-	server := &http.Server{Handler: httpapi.NewHandler(application), ReadHeaderTimeout: 5 * time.Second}
+	var handler http.Handler
+	if cfg.Listen != "" {
+		handler = httpapi.NewTCPHandler(application, life)
+	} else {
+		handler = httpapi.NewUnixHandler(application, life)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	listener, cleanup, err := listen(cfg)
 	if err != nil {
 		return err
@@ -78,12 +96,41 @@ func Run(ctx context.Context, cfg Config) error {
 	case err := <-serveResult:
 		return err
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		shutdownErr := server.Shutdown(shutdownContext)
-		serveErr := <-serveResult
-		return errors.Join(shutdownErr, serveErr)
+	case <-life.Done():
 	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := server.Shutdown(shutdownContext)
+	if shutdownErr != nil {
+		_ = server.Close()
+	}
+	serveErr := <-serveResult
+	return errors.Join(shutdownErr, serveErr)
+}
+
+func resolveConfig(cfg Config) (Config, error) {
+	switch cfg.LaunchMode {
+	case "":
+		cfg.LaunchMode = LaunchModeForeground
+	case LaunchModeAuto, LaunchModeForeground, LaunchModeSupervised:
+	default:
+		return cfg, fmt.Errorf("unknown launch mode %q", cfg.LaunchMode)
+	}
+	if cfg.DatabasePath == "" {
+		path, err := store.ResolveStatePath(true)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.DatabasePath = path
+	}
+	if cfg.Listen == "" && cfg.SocketPath == "" {
+		path, err := ResolveSocketPath(true)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.SocketPath = path
+	}
+	return cfg, nil
 }
 
 func listen(cfg Config) (net.Listener, func(), error) {

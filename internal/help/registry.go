@@ -63,6 +63,7 @@ type Operation struct {
 	MCPName          string       `json:"mcp_tool,omitempty"`
 	Mutating         bool         `json:"mutating,omitempty"`
 	RequiresIdentity bool         `json:"requires_identity,omitempty"`
+	UnixOnly         bool         `json:"unix_only,omitempty"`
 	Parameters       []Parameter  `json:"parameters,omitempty"`
 }
 
@@ -75,8 +76,11 @@ func route(method, path string) *HTTPBinding { return &HTTPBinding{Method: metho
 // registry is the single authored catalog. CLI usage, capability JSON,
 // OpenAPI, MCP tools, and agent instructions are all generated from it.
 var registry = []Operation{
-	{ID: "service.serve", Category: "Service", Summary: "Run the local Comms service", Description: "Runs the foreground process that exclusively owns the SQLite store.", CLI: "serve"},
-	{ID: "store.handshake", Category: "Service", Summary: "Inspect the server handshake", Description: "Returns store, protocol, schema, server version, and capability information.", CLI: "hello", HTTP: route("GET", "/v1/hello"), MCPName: "comms_handshake"},
+	{ID: "service.serve", Category: "Service", Summary: "Run the local Comms service", Description: "Runs the foreground process that exclusively owns the SQLite store.", CLI: "serve [--socket PATH] [--db PATH] [--listen ADDRESS]"},
+	{ID: "service.shutdown", Category: "Service", Summary: "Shut down a matching service incarnation", Description: "Requests a graceful stop of the Unix-socket service identified by server_instance_id. The route is not exposed by a TCP listener. Shutdown begins after the response is committed.", HTTP: route("POST", "/v1/admin/shutdown"), UnixOnly: true, Parameters: []Parameter{
+		p("server_instance_id", "Expected process incarnation from GET /v1/hello.", "string", BodyParameter, true),
+	}},
+	{ID: "store.handshake", Category: "Service", Summary: "Inspect the server handshake", Description: "Returns store, protocol, schema, server version, process incarnation, launch mode, and capability information.", CLI: "hello", HTTP: route("GET", "/v1/hello"), MCPName: "comms_handshake"},
 	{ID: "capability.describe", Category: "Service", Summary: "Describe supported capabilities", Description: "Returns this versioned operation catalog for client feature discovery.", CLI: "capabilities", HTTP: route("GET", "/v1/capabilities"), MCPName: "comms_describe_capabilities"},
 	{ID: "api.openapi", Category: "Service", Summary: "Render the HTTP OpenAPI contract", Description: "Returns the generated OpenAPI 3.1 contract for the versioned HTTP interface.", CLI: "openapi", HTTP: route("GET", "/v1/openapi.json")},
 	{ID: "instructions.generate", Category: "Service", Summary: "Show agent instructions", Description: "Describes Comms capabilities, guarantees, boundaries, and optional usage examples.", CLI: "instructions", HTTP: route("GET", "/v1/instructions"), MCPName: "comms_instructions"},

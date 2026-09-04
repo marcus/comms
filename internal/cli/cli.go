@@ -191,11 +191,23 @@ func (r *runner) serve(args []string) error {
 	listen := fs.String("listen", "", "")
 	socket := fs.String("socket", r.g.socket, "")
 	database := fs.String("db", "", "")
+	daemonChild := fs.Bool("daemon-child", false, "")
+	supervised := fs.Bool("supervised", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
 	if fs.NArg() != 0 {
 		return usage("serve accepts flags only")
+	}
+	if *daemonChild && *supervised {
+		return usage("--daemon-child and --supervised are mutually exclusive")
+	}
+	mode := service.LaunchModeForeground
+	if *daemonChild {
+		mode = service.LaunchModeAuto
+	}
+	if *supervised {
+		mode = service.LaunchModeSupervised
 	}
 	path := *socket
 	if path == "" {
@@ -210,7 +222,7 @@ func (r *runner) serve(args []string) error {
 	} else {
 		_, _ = fmt.Fprintf(r.env.Stdout, "comms: serving on http://%s\n", *listen)
 	}
-	return service.Run(r.env.Context, service.Config{DatabasePath: *database, SocketPath: path, Listen: *listen})
+	return service.Run(r.env.Context, service.Config{DatabasePath: *database, SocketPath: path, Listen: *listen, LaunchMode: mode})
 }
 
 func (r *runner) join(args []string) error {
@@ -991,7 +1003,7 @@ func fail(env Env, jsonOutput bool, err error) int {
 		code = 2
 	case errors.Is(err, app.ErrNotFound):
 		code = 3
-	case errors.Is(err, app.ErrConflict):
+	case errors.Is(err, app.ErrConflict), errors.Is(err, httpapi.ErrServerInstanceChanged):
 		code = 4
 	case errors.Is(err, app.ErrUnavailable), errors.Is(err, app.ErrOverloaded), errors.Is(err, app.ErrClosed), errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		code = 5
@@ -1000,6 +1012,8 @@ func fail(env Env, jsonOutput bool, err error) int {
 		stable := "internal"
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			stable = "timeout"
+		} else if errors.Is(err, httpapi.ErrServerInstanceChanged) {
+			stable = "server_instance_changed"
 		} else {
 			switch code {
 			case 2:

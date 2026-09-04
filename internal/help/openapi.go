@@ -75,14 +75,20 @@ func OpenAPIJSON() ([]byte, error) {
 }
 
 func openAPIOperation(operation Operation) map[string]any {
+	successStatus := "200"
+	successDescription := "Successful " + operation.ID + " response."
+	if operation.ID == "service.shutdown" {
+		successStatus = "202"
+		successDescription = "Accepted " + operation.ID + " request; shutdown begins after this response is committed."
+	}
 	document := map[string]any{
 		"operationId": operation.ID,
 		"summary":     operation.Summary,
 		"description": operation.Description,
 		"tags":        []string{operation.Category},
 		"responses": map[string]any{
-			"200": map[string]any{
-				"description": "Successful " + operation.ID + " response.",
+			successStatus: map[string]any{
+				"description": successDescription,
 				"content":     successContent(operation),
 			},
 			"default": map[string]any{
@@ -164,11 +170,31 @@ type whoamiResponse struct {
 	Source string       `json:"source"`
 }
 
+// Handshake is the HTTP hello payload: store handshake plus process lifecycle.
+type Handshake struct {
+	app.Handshake
+	ServerInstanceID string    `json:"server_instance_id,omitempty"`
+	PID              int       `json:"pid,omitempty"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	LaunchMode       string    `json:"launch_mode,omitempty"`
+	Commit           string    `json:"commit,omitempty"`
+	SocketPath       string    `json:"socket_path,omitempty"`
+	DatabasePath     string    `json:"database_path,omitempty"`
+}
+
+// ShutdownAccepted is the 202 payload for a matching admin shutdown request.
+type ShutdownAccepted struct {
+	Accepted         bool   `json:"accepted"`
+	ServerInstanceID string `json:"server_instance_id"`
+}
+
 func responseType(id string) reflect.Type {
 	var value any
 	switch id {
 	case "store.handshake":
-		value = app.Handshake{}
+		value = Handshake{}
+	case "service.shutdown":
+		value = ShutdownAccepted{}
 	case "capability.describe":
 		value = CapabilityDescription{}
 	case "api.openapi":

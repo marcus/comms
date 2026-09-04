@@ -22,6 +22,13 @@ func TestTypedIDs(t *testing.T) {
 	if _, err := ParseTopicID(string(a)); err == nil {
 		t.Fatal("accepted wrong prefix")
 	}
+	instance, err := NewServerInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(instance), "srv_") {
+		t.Fatalf("server instance id=%q", instance)
+	}
 }
 
 func TestValidationBoundaries(t *testing.T) {

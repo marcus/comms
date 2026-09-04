@@ -17,6 +17,7 @@ type CapabilityOperation struct {
 	Description      string       `json:"description"`
 	Mutating         bool         `json:"mutating"`
 	RequiresIdentity bool         `json:"requires_identity"`
+	UnixOnly         bool         `json:"unix_only,omitempty"`
 	CLI              string       `json:"cli,omitempty"`
 	HTTP             *HTTPBinding `json:"http,omitempty"`
 	MCPTool          string       `json:"mcp_tool,omitempty"`
@@ -47,6 +48,7 @@ func Capabilities() CapabilityDescription {
 			Description:      operation.Description,
 			Mutating:         operation.Mutating,
 			RequiresIdentity: operation.RequiresIdentity,
+			UnixOnly:         operation.UnixOnly,
 			CLI:              operation.CLI,
 			HTTP:             operation.HTTP,
 			MCPTool:          operation.MCPName,

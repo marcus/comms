@@ -13,7 +13,7 @@ func TestRegistryIsValidAndComplete(t *testing.T) {
 	}
 
 	wantIDs := []string{
-		"service.serve", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
+		"service.serve", "service.shutdown", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
 		"agent.join", "agent.whoami", "agent.get", "agent.update", "agent.retire", "agent.list",
 		"topic.create", "topic.ensure", "topic.update", "topic.archive", "topic.list", "subscription.follow", "subscription.unfollow", "subscription.list",
 		"message.publish", "message.direct_send", "message.reply", "message.inbox", "message.topic", "message.thread", "message.peek", "message.read_through", "message.receipts", "message.search", "message.observe",
@@ -189,6 +189,21 @@ func TestOpenAPIModelsActualSuccessContracts(t *testing.T) {
 		t.Fatalf("export incorrectly claims JSON response")
 	}
 
+	hello := paths["/v1/hello"].(map[string]any)["get"].(map[string]any)["responses"].(map[string]any)["200"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)["data"].(map[string]any)["properties"].(map[string]any)
+	for _, field := range []string{"store_id", "protocol_version", "schema_version", "server_instance_id", "pid", "started_at", "launch_mode", "commit", "socket_path", "database_path", "capabilities"} {
+		if _, ok := hello[field]; !ok {
+			t.Errorf("handshake response omits %s", field)
+		}
+	}
+
+	shutdown := paths["/v1/admin/shutdown"].(map[string]any)["post"].(map[string]any)
+	if _, ok := shutdown["responses"].(map[string]any)["202"]; !ok {
+		t.Fatalf("shutdown responses=%#v", shutdown["responses"])
+	}
+	if _, ok := shutdown["responses"].(map[string]any)["200"]; ok {
+		t.Fatal("shutdown should not claim a 200 response")
+	}
+
 	for _, operation := range Operations() {
 		if operation.HTTP == nil || operation.ID == "diagnostic.export" {
 			continue
@@ -222,12 +237,30 @@ func TestInstructionsStateCursorAndTrustBoundaries(t *testing.T) {
 func TestOperationsReturnsDefensiveCopy(t *testing.T) {
 	operations := Operations()
 	operations[0].ID = "changed"
-	operations[8].Parameters[0].Name = "changed"
-	operations[8].Parameters[0].Enum = []string{"changed"}
+	var parameterized *Operation
+	for i := range operations {
+		if len(operations[i].Parameters) > 0 {
+			parameterized = &operations[i]
+			break
+		}
+	}
+	if parameterized == nil {
+		t.Fatal("no parameterized operation")
+	}
+	parameterized.Parameters[0].Name = "changed"
+	parameterized.Parameters[0].Enum = []string{"changed"}
+	if operations[1].HTTP == nil {
+		t.Fatal("expected HTTP operation at index 1")
+	}
 	operations[1].HTTP.Path = "/changed"
 
 	fresh := Operations()
-	if fresh[0].ID == "changed" || fresh[8].Parameters[0].Name == "changed" || fresh[1].HTTP.Path == "/changed" {
+	if fresh[0].ID == "changed" || fresh[1].HTTP.Path == "/changed" {
 		t.Fatal("Operations exposed mutable registry state")
+	}
+	for _, operation := range fresh {
+		if len(operation.Parameters) > 0 && operation.Parameters[0].Name == "changed" {
+			t.Fatal("Operations exposed mutable registry state")
+		}
 	}
 }

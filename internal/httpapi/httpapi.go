@@ -26,6 +26,29 @@ const (
 	AgentHeader    = "X-Comms-Agent-ID"
 )
 
+// ErrServerInstanceChanged is returned when a shutdown request names a stale
+// process incarnation. The HTTP code is server_instance_changed.
+var ErrServerInstanceChanged = errors.New("server instance changed")
+
+// LifecycleStatus is process identity composed onto the HTTP handshake.
+type LifecycleStatus struct {
+	ServerInstanceID string
+	PID              int
+	StartedAt        time.Time
+	LaunchMode       string
+	Version          string
+	Commit           string
+	SocketPath       string
+	DatabasePath     string
+}
+
+// Lifecycle is the process-control surface the Unix handler uses. The
+// implementation lives in internal/service.
+type Lifecycle interface {
+	Status() LifecycleStatus
+	RequestShutdown(expectedID string) error
+}
+
 type responseEnvelope struct {
 	Schema string `json:"schema"`
 	Data   any    `json:"data"`
@@ -41,10 +64,29 @@ type ErrorBody struct {
 	Details map[string]any `json:"details"`
 }
 
-type Handler struct{ app *app.Service }
+type Handler struct {
+	app  *app.Service
+	life Lifecycle
+	unix bool
+}
 
 func NewHandler(service *app.Service) http.Handler {
-	h := &Handler{app: service}
+	return newHandler(service, nil, false)
+}
+
+// NewTCPHandler serves the application API with lifecycle identity on hello
+// and does not mount Unix-only admin routes.
+func NewTCPHandler(service *app.Service, life Lifecycle) http.Handler {
+	return newHandler(service, life, false)
+}
+
+// NewUnixHandler serves the application API and Unix-only admin shutdown.
+func NewUnixHandler(service *app.Service, life Lifecycle) http.Handler {
+	return newHandler(service, life, true)
+}
+
+func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
+	h := &Handler{app: service, life: life, unix: unix}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/hello", h.handshake)
 	mux.HandleFunc("GET /v1/capabilities", h.capabilities)
@@ -80,8 +122,11 @@ func NewHandler(service *app.Service) http.Handler {
 	mux.HandleFunc("GET /v1/retention", h.retention)
 	mux.HandleFunc("POST /v1/purge", h.purge)
 	mux.HandleFunc("GET /v1/export", h.export)
+	if unix {
+		mux.HandleFunc("POST /v1/admin/shutdown", h.shutdown)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		operation, pathKnown := findOperation(r)
+		operation, pathKnown := h.findOperation(r)
 		if operation == nil {
 			if pathKnown {
 				h.respondStatus(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -98,10 +143,13 @@ func NewHandler(service *app.Service) http.Handler {
 	})
 }
 
-func findOperation(r *http.Request) (*help.Operation, bool) {
+func (h *Handler) findOperation(r *http.Request) (*help.Operation, bool) {
 	pathKnown := false
 	for _, candidate := range help.Operations() {
 		if candidate.HTTP == nil || !matchPath(candidate.HTTP.Path, r.URL.Path) {
+			continue
+		}
+		if candidate.UnixOnly && !h.unix {
 			continue
 		}
 		pathKnown = true
@@ -165,14 +213,53 @@ func matchPath(pattern, actual string) bool {
 
 func (h *Handler) handshake(w http.ResponseWriter, r *http.Request) {
 	result, err := h.app.Handshake(r.Context())
-	if err == nil {
-		result.ServerVersion = buildinfo.Version
-		result.Capabilities = result.Capabilities[:0]
-		for _, operation := range help.Operations() {
-			result.Capabilities = append(result.Capabilities, operation.ID)
-		}
+	if err != nil {
+		h.respond(w, nil, err)
+		return
 	}
-	h.respond(w, result, err)
+	result.ServerVersion = buildinfo.Version
+	result.Capabilities = result.Capabilities[:0]
+	for _, operation := range help.Operations() {
+		result.Capabilities = append(result.Capabilities, operation.ID)
+	}
+	out := help.Handshake{Handshake: result}
+	if h.life != nil {
+		status := h.life.Status()
+		if status.Version != "" {
+			out.ServerVersion = status.Version
+		}
+		out.ServerInstanceID = status.ServerInstanceID
+		out.PID = status.PID
+		out.StartedAt = status.StartedAt
+		out.LaunchMode = status.LaunchMode
+		out.Commit = status.Commit
+		out.SocketPath = status.SocketPath
+		out.DatabasePath = status.DatabasePath
+	}
+	h.respond(w, out, nil)
+}
+
+func (h *Handler) shutdown(w http.ResponseWriter, r *http.Request) {
+	if h.life == nil {
+		h.respondStatus(w, http.StatusNotFound, "not_found", "route not found")
+		return
+	}
+	var body struct {
+		ServerInstanceID string `json:"server_instance_id"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.ServerInstanceID) == "" {
+		h.respond(w, nil, fmt.Errorf("%w: server_instance_id is required", domain.ErrInvalid))
+		return
+	}
+	if body.ServerInstanceID != h.life.Status().ServerInstanceID {
+		h.respond(w, nil, ErrServerInstanceChanged)
+		return
+	}
+	h.respondAccepted(w, help.ShutdownAccepted{Accepted: true, ServerInstanceID: body.ServerInstanceID})
+	_ = h.life.RequestShutdown(body.ServerInstanceID)
 }
 
 func (h *Handler) capabilities(w http.ResponseWriter, _ *http.Request) {
@@ -603,6 +690,15 @@ func (h *Handler) respond(w http.ResponseWriter, value any, err error) {
 	_ = json.NewEncoder(w).Encode(responseEnvelope{Schema: ResponseSchema, Data: value})
 }
 
+func (h *Handler) respondAccepted(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(responseEnvelope{Schema: ResponseSchema, Data: value})
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (h *Handler) respondStatus(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -615,6 +711,8 @@ func classify(err error) (int, string) {
 		return http.StatusBadRequest, "invalid_argument"
 	case errors.Is(err, app.ErrNotFound):
 		return http.StatusNotFound, "not_found"
+	case errors.Is(err, ErrServerInstanceChanged):
+		return http.StatusConflict, "server_instance_changed"
 	case errors.Is(err, app.ErrConflict):
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
@@ -697,6 +795,8 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 			return fmt.Errorf("%w: %s", domain.ErrInvalid, envelope.Error.Message)
 		case "not_found":
 			return fmt.Errorf("%w: %s", app.ErrNotFound, envelope.Error.Message)
+		case "server_instance_changed":
+			return fmt.Errorf("%w: %s", ErrServerInstanceChanged, envelope.Error.Message)
 		case "conflict":
 			return fmt.Errorf("%w: %s", app.ErrConflict, envelope.Error.Message)
 		case "timeout":
