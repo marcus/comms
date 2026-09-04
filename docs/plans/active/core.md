@@ -1,7 +1,7 @@
 # Comms core implementation plan
 
 - **Task:** td-8f5777
-- **Status:** v1 CLI/HTTP core implemented; the v1.0.0 publication candidate is under final review. Phase 9 consumer adapters are explicit follow-on work.
+- **Status:** v1 CLI/HTTP core published as v1.0.0 on 2026-09-04. Phase 9 consumer adapters are explicit follow-on work.
 
 ## Outcome
 
