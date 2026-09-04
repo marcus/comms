@@ -292,6 +292,53 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
+func TestExportDoesNotReplayDroppedConnection(t *testing.T) {
+	socket := filepath.Join(shortTempDir(t), "comms.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	var exports atomicInt
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/export" {
+			http.NotFound(w, r)
+			return
+		}
+		exports.add(1)
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("hijack unsupported")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	client := NewUnixClient(socket, "")
+	err = client.Export(context.Background(), io.Discard)
+	if err == nil {
+		t.Fatal("expected export error")
+	}
+	if got := exports.get(); got != 1 {
+		t.Fatalf("export requests=%d want 1 err=%v", got, err)
+	}
+}
+
+type atomicInt struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (a *atomicInt) add(n int) { a.mu.Lock(); a.n += n; a.mu.Unlock() }
+func (a *atomicInt) get() int  { a.mu.Lock(); defer a.mu.Unlock(); return a.n }
+
 func TestClientDoPreservesDialCause(t *testing.T) {
 	client := NewUnixClient(filepath.Join(shortTempDir(t), "missing.sock"), "")
 	err := client.Do(context.Background(), http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})

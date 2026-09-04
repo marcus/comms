@@ -36,6 +36,8 @@ type Env struct {
 	Getenv      func(string) string
 	Executable  func() (string, error)
 	StartDaemon func(ctx context.Context, spec DaemonSpec) (DaemonHandle, error)
+	Version     string
+	Commit      string
 }
 type globals struct {
 	json        bool
@@ -808,7 +810,15 @@ func (r *runner) clientWithIdentity(required bool) (selectedIdentity, *httpapi.C
 }
 
 func (r *runner) do(client *httpapi.Client, method, path string, query url.Values, input, output any) error {
-	return client.Do(r.commandContext(), method, path, query, input, output)
+	ctx := r.commandContext()
+	err := client.Do(ctx, method, path, query, input, output)
+	if err == nil || r.policy != policyAutoStart || !retryableTransportError(err) {
+		return err
+	}
+	if readyErr := r.ensureReady(client); readyErr != nil {
+		return readyErr
+	}
+	return client.Do(ctx, method, path, query, input, output)
 }
 
 func (r *runner) output(value any) error {
@@ -1018,9 +1028,12 @@ func fail(env Env, jsonOutput bool, err error) int {
 	}
 	if jsonOutput {
 		stable := "internal"
+		var re *restartRequiredError
 		switch {
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			stable = "timeout"
+		case errors.As(err, &re):
+			stable = re.code
 		case errors.Is(err, httpapi.ErrServerInstanceChanged):
 			stable = "server_instance_changed"
 		case code == 2:
@@ -1040,11 +1053,20 @@ func fail(env Env, jsonOutput bool, err error) int {
 				details["log_path"] = se.logPath
 			}
 		}
+		if re != nil {
+			if re.launchMode != "" {
+				details["launch_mode"] = re.launchMode
+			}
+			if re.action != "" {
+				details["action"] = re.action
+			}
+		}
 		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: details}})
 	} else {
 		_, _ = fmt.Fprintf(env.Stderr, "comms: %v\n", err)
 		var se *startupError
-		if code == 5 && !errors.As(err, &se) {
+		var re *restartRequiredError
+		if code == 5 && !errors.As(err, &se) && !errors.As(err, &re) {
 			_, _ = io.WriteString(env.Stderr, "Start the service with 'comms serve'.\n")
 		}
 	}

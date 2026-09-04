@@ -64,3 +64,23 @@ func (l *lifecycleLock) Close() error {
 	_ = unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
 	return l.file.Close()
 }
+
+func ownerLockReleased(path string) (bool, error) {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	defer func() { _ = file.Close() }()
+	err = unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
+		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+		return true, nil
+	}
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return false, nil
+	}
+	return false, err
+}

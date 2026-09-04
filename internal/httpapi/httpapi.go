@@ -825,10 +825,14 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	return json.Unmarshal(envelope.Data, output)
 }
 func (c *Client) Export(ctx context.Context, w io.Writer) error {
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/export", nil)
+	// A non-nil body without GetBody makes GET non-replayable so Transport
+	// cannot transparently retry a partially streamed export.
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/export", io.NopCloser(bytes.NewReader(nil)))
 	if e != nil {
 		return e
 	}
+	req.GetBody = nil
+	req.ContentLength = 0
 	if c.agent != "" {
 		req.Header.Set(AgentHeader, c.agent)
 	}

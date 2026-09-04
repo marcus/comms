@@ -4,15 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcus/comms/internal/app"
 	"github.com/marcus/comms/internal/help"
 	"github.com/marcus/comms/internal/httpapi"
 	"github.com/marcus/comms/internal/service"
+	"github.com/marcus/comms/pkg/buildinfo"
 )
 
 type commandPolicy int
@@ -54,6 +60,38 @@ func (e *startupError) Error() string {
 }
 
 func (e *startupError) Unwrap() error { return e.err }
+
+type restartRequiredError struct {
+	code       string
+	launchMode string
+	action     string
+	message    string
+}
+
+func (e *restartRequiredError) Error() string { return e.message }
+func (e *restartRequiredError) Unwrap() error { return app.ErrUnavailable }
+
+func serverRestartRequired(launchMode string) error {
+	action := "stop the foreground Comms process, then rerun this command"
+	if launchMode == string(service.LaunchModeSupervised) {
+		action = "run 'brew services restart comms'"
+	}
+	return &restartRequiredError{
+		code:       "server_restart_required",
+		launchMode: launchMode,
+		action:     action,
+		message:    fmt.Sprintf("running %s Comms service is older than this CLI and cannot be replaced automatically; %s", launchMode, action),
+	}
+}
+
+func legacyServerRestartRequired() error {
+	action := "stop that foreground process once, then rerun this command"
+	return &restartRequiredError{
+		code:    "legacy_server_restart_required",
+		action:  action,
+		message: "the running Comms server predates lifecycle control and cannot be replaced automatically; " + action,
+	}
+}
 
 func startupFailure(phase, logPath string, err error) error {
 	if err == nil {
@@ -125,40 +163,207 @@ func (r *runner) resolveSocket() (string, error) {
 	return socket, nil
 }
 
+type replaceAction int
+
+const (
+	replaceNone replaceAction = iota
+	replaceAuto
+	replaceForeground
+	replaceSupervised
+	replaceLegacy
+)
+
+func (a replaceAction) String() string {
+	switch a {
+	case replaceNone:
+		return "none"
+	case replaceAuto:
+		return "auto"
+	case replaceForeground:
+		return "foreground"
+	case replaceSupervised:
+		return "supervised"
+	case replaceLegacy:
+		return "legacy"
+	default:
+		return strconv.Itoa(int(a))
+	}
+}
+
 func (r *runner) ensureReady(client *httpapi.Client) error {
 	ctx := r.commandContext()
-	_, err := handshake(ctx, client)
+	hs, err := handshake(ctx, client)
 	if err == nil {
-		return nil
+		if err := checkHandshakeCompatibility(hs); err != nil {
+			return err
+		}
+		switch r.replacementDecision(hs) {
+		case replaceNone:
+			return nil
+		case replaceLegacy:
+			return legacyServerRestartRequired()
+		case replaceForeground, replaceSupervised:
+			return serverRestartRequired(hs.LaunchMode)
+		case replaceAuto:
+			return r.reconcile(ctx, client)
+		default:
+			return nil
+		}
 	}
 	if !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) || !httpapi.IsAutoStartableDial(err) {
 		return err
 	}
+	return r.reconcile(ctx, client)
+}
+
+func (r *runner) reconcile(ctx context.Context, client *httpapi.Client) error {
 	logPath := r.serverLogPath()
-	lockPath := r.socket + ".lifecycle.lock"
-	lock, err := acquireLifecycleLock(ctx, lockPath)
+	lock, err := acquireLifecycleLock(ctx, r.socket+".lifecycle.lock")
 	if err != nil {
 		return startupFailure("lock", logPath, err)
 	}
 	defer func() { _ = lock.Close() }()
-	_, err = handshake(ctx, client)
-	if err == nil {
-		return nil
+	return r.reconcileLocked(ctx, client, logPath)
+}
+
+func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, logPath string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return startupFailure("readiness", logPath, err)
+		}
+		hs, err := handshake(ctx, client)
+		if err == nil {
+			if err := checkHandshakeCompatibility(hs); err != nil {
+				return err
+			}
+			switch r.replacementDecision(hs) {
+			case replaceNone:
+				return nil
+			case replaceLegacy:
+				return legacyServerRestartRequired()
+			case replaceForeground, replaceSupervised:
+				return serverRestartRequired(hs.LaunchMode)
+			case replaceAuto:
+				if err := shutdownInstance(ctx, client, hs.ServerInstanceID); err != nil {
+					if errors.Is(err, httpapi.ErrServerInstanceChanged) {
+						continue
+					}
+					if !httpapi.IsAutoStartableDial(err) && !retryableTransportError(err) {
+						return err
+					}
+				}
+				if err := r.waitUntilReleased(ctx, client, hs.ServerInstanceID, logPath); err != nil {
+					return err
+				}
+				continue
+			default:
+				return nil
+			}
+		}
+		if !httpapi.IsAutoStartableDial(err) {
+			return err
+		}
+		handle, err := r.spawnDaemon(ctx)
+		if err != nil {
+			return startupFailure("spawn", logPath, err)
+		}
+		return r.waitUntilReady(ctx, client, handle, logPath)
 	}
-	if !httpapi.IsAutoStartableDial(err) {
-		return err
-	}
-	handle, err := r.spawnDaemon(ctx)
-	if err != nil {
-		return startupFailure("spawn", logPath, err)
-	}
-	return r.waitUntilReady(ctx, client, handle, logPath)
 }
 
 func handshake(ctx context.Context, client *httpapi.Client) (help.Handshake, error) {
 	var hs help.Handshake
 	err := client.Do(ctx, "GET", "/v1/hello", nil, nil, &hs)
 	return hs, err
+}
+
+func shutdownInstance(ctx context.Context, client *httpapi.Client, instanceID string) error {
+	var accepted help.ShutdownAccepted
+	return client.Do(ctx, "POST", "/v1/admin/shutdown", nil, map[string]string{"server_instance_id": instanceID}, &accepted)
+}
+
+func checkHandshakeCompatibility(hs help.Handshake) error {
+	if hs.ProtocolVersion != app.ProtocolVersion {
+		return fmt.Errorf("%w: incompatible protocol version %d (client supports %d)", app.ErrConflict, hs.ProtocolVersion, app.ProtocolVersion)
+	}
+	if hs.SchemaVersion != app.SchemaVersion {
+		return fmt.Errorf("%w: incompatible schema version %d (client supports %d)", app.ErrConflict, hs.SchemaVersion, app.SchemaVersion)
+	}
+	return nil
+}
+
+func (r *runner) replacementDecision(hs help.Handshake) replaceAction {
+	if !isNewerStable(r.buildVersion(), hs.ServerVersion) {
+		return replaceNone
+	}
+	if !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
+		return replaceNone
+	}
+	if hs.ServerInstanceID == "" || hs.LaunchMode == "" {
+		return replaceLegacy
+	}
+	switch hs.LaunchMode {
+	case string(service.LaunchModeAuto):
+		return replaceAuto
+	case string(service.LaunchModeForeground):
+		return replaceForeground
+	case string(service.LaunchModeSupervised):
+		return replaceSupervised
+	default:
+		return replaceForeground
+	}
+}
+
+var stableSemver = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+
+type semverTriple struct{ major, minor, patch int }
+
+func parseStableSemver(version string) (semverTriple, bool) {
+	match := stableSemver.FindStringSubmatch(strings.TrimSpace(version))
+	if match == nil {
+		return semverTriple{}, false
+	}
+	major, err1 := strconv.Atoi(match[1])
+	minor, err2 := strconv.Atoi(match[2])
+	patch, err3 := strconv.Atoi(match[3])
+	if err1 != nil || err2 != nil || err3 != nil {
+		return semverTriple{}, false
+	}
+	return semverTriple{major: major, minor: minor, patch: patch}, true
+}
+
+func (v semverTriple) cmp(other semverTriple) int {
+	switch {
+	case v.major != other.major:
+		return v.major - other.major
+	case v.minor != other.minor:
+		return v.minor - other.minor
+	default:
+		return v.patch - other.patch
+	}
+}
+
+func isNewerStable(clientVersion, serverVersion string) bool {
+	client, clientOK := parseStableSemver(clientVersion)
+	server, serverOK := parseStableSemver(serverVersion)
+	if !clientOK || !serverOK {
+		return false
+	}
+	return client.cmp(server) > 0
+}
+
+func (r *runner) buildVersion() string {
+	if r.env.Version != "" {
+		return r.env.Version
+	}
+	return buildinfo.Version
+}
+
+func (r *runner) buildCommit() string {
+	if r.env.Commit != "" {
+		return r.env.Commit
+	}
+	return buildinfo.Commit
 }
 
 func (r *runner) spawnDaemon(ctx context.Context) (DaemonHandle, error) {
@@ -207,6 +412,8 @@ func (r *runner) resolvedExecutable() (string, error) {
 }
 
 func (r *runner) waitUntilReady(ctx context.Context, client *httpapi.Client, handle DaemonHandle, logPath string) error {
+	wantVersion := r.buildVersion()
+	wantCommit := r.buildCommit()
 	attempt := 0
 	for {
 		select {
@@ -221,7 +428,10 @@ func (r *runner) waitUntilReady(ctx context.Context, client *httpapi.Client, han
 		default:
 		}
 		hs, err := handshake(ctx, client)
-		if err == nil && hs.ServerInstanceID != "" && hs.LaunchMode == string(service.LaunchModeAuto) {
+		if err == nil && hs.ServerInstanceID != "" && hs.LaunchMode == string(service.LaunchModeAuto) && hs.ServerVersion == wantVersion && hs.Commit == wantCommit {
+			if err := checkHandshakeCompatibility(hs); err != nil {
+				return err
+			}
 			return nil
 		}
 		if err := waitBackoff(ctx, attempt); err != nil {
@@ -229,6 +439,67 @@ func (r *runner) waitUntilReady(ctx context.Context, client *httpapi.Client, han
 		}
 		attempt++
 	}
+}
+
+func (r *runner) waitUntilReleased(ctx context.Context, client *httpapi.Client, instanceID, logPath string) error {
+	attempt := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return startupFailure("shutdown", logPath, err)
+		}
+		hs, err := handshake(ctx, client)
+		switch {
+		case err == nil:
+			if hs.ServerInstanceID != instanceID {
+				return nil
+			}
+		case httpapi.IsAutoStartableDial(err):
+			released, lockErr := ownerLockReleased(r.dbLockPath())
+			if lockErr != nil {
+				return startupFailure("shutdown", logPath, lockErr)
+			}
+			if released {
+				return nil
+			}
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			return startupFailure("shutdown", logPath, err)
+		case !retryableTransportError(err):
+			return err
+		}
+		if err := waitBackoff(ctx, attempt); err != nil {
+			return startupFailure("shutdown", logPath, err)
+		}
+		attempt++
+	}
+}
+
+func (r *runner) dbLockPath() string {
+	dir, err := r.stateDir()
+	if err != nil {
+		return "comms.db.lock"
+	}
+	return filepath.Join(dir, "comms.db.lock")
+}
+
+func retryableTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.EPIPE || errno == syscall.ECONNRESET || errno == syscall.ENOENT || errno == syscall.ECONNREFUSED
+	}
+	return false
 }
 
 func waitBackoff(ctx context.Context, attempt int) error {
