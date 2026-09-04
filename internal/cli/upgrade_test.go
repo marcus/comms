@@ -16,10 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/marcus/comms/internal/app"
 	"github.com/marcus/comms/internal/help"
 	"github.com/marcus/comms/internal/httpapi"
-	"golang.org/x/sys/unix"
 )
 
 func TestParseStableSemver(t *testing.T) {

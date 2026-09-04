@@ -138,15 +138,31 @@ func shutdownIsolated(t *testing.T, socket string) {
 		return
 	}
 	deadline := time.Now().Add(5 * time.Second)
+	socketGone := false
 	for time.Now().Before(deadline) {
 		var again help.Handshake
 		err := client.Do(context.Background(), "GET", "/v1/hello", nil, nil, &again)
 		if err != nil && httpapi.IsAutoStartableDial(err) {
+			socketGone = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !socketGone {
+		t.Errorf("daemon still reachable after shutdown pid=%d", hs.PID)
+		return
+	}
+	if hs.PID <= 0 {
+		return
+	}
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(hs.PID, 0)
+		if err != nil && errors.Is(err, syscall.ESRCH) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("daemon still reachable after shutdown pid=%d", hs.PID)
+	t.Errorf("daemon pid %d still alive after socket removal", hs.PID)
 }
 
 func TestSteelThreadAutoStartFromJoin(t *testing.T) {

@@ -82,7 +82,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer func() {
+		_ = adapter.Close()
+		cleanup()
+	}()
 
 	serveResult := make(chan error, 1)
 	go func() {
