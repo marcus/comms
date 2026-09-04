@@ -38,4 +38,3 @@ CREATE TABLE idempotency_keys(
   PRIMARY KEY(client_id, request_id)
 );
 CREATE TABLE purge_runs(id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, completed_at INTEGER, removed_messages INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');
-
