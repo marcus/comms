@@ -159,6 +159,7 @@ cp "$notes_fixture" "$guard_repo/CHANGELOG.md"
 race_repo="$temporary/source-race"
 race_remote="$temporary/source-race.git"
 git init --bare --quiet "$race_remote"
+git --git-dir="$race_remote" symbolic-ref HEAD refs/heads/main
 git init --quiet --initial-branch=main "$race_repo"
 git -C "$race_repo" config user.name release-test
 git -C "$race_repo" config user.email release-test@example.invalid
