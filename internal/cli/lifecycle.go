@@ -358,6 +358,8 @@ func (r *runner) refuseLaunchMode(launchMode string) error {
 			return supervisedControlRequired("restart")
 		case policyInspectOnly:
 			return supervisedControlRequired("stop")
+		default:
+			return supervisedControlRequired("restart")
 		}
 	}
 	return serverRestartRequired(launchMode)

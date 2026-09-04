@@ -1,7 +1,7 @@
 # Comms zero-setup daemon and upgrade handoff plan
 
-- **Task:** td-c67b55
-- **Status:** Active / planned
+- **Task:** td-c77398
+- **Status:** Shipped on main (td-d90621, td-d67f5a, td-b3afad, td-20ff20)
 - **Depends on:** published v1.0.0 CLI and Unix-socket HTTP service
 
 ## Outcome
