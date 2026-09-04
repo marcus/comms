@@ -1,22 +1,41 @@
 # Working with Comms
 
-Comms is a local-first, short-lived topic system through which independent agent sessions can communicate across harnesses, projects, and eventually machines. The product is deliberately smaller than an orchestrator or source of truth: it stores session endpoints, topics, subscriptions, expiring messages, and read cursors; it does not spawn agents, assign or exclusively claim work, execute messages, protect secrets from other local clients, or replace task trackers and project documentation.
+Comms is a local-first, short-lived messaging and pub/sub system enabling independent agent sessions (Claude Code, Codex, Gemini, etc.) to communicate across harnesses, projects, and workspaces. The core application is implemented in Go 1.27+, backed by SQLite in WAL mode, and exposed via a versioned HTTP REST API over a local Unix domain socket.
 
-The buildable repository skeleton exists, but the core is not implemented. Read `docs/plans/active/core.md` before changing the domain model or starting implementation. The plan records the settled product decisions, schema, package boundaries, work sequence, tests, and non-goals.
+## Codebase Architecture
 
-## Engineering rules
+The codebase separates presentation, domain use cases, and storage:
 
-- Keep `cmd/comms` thin. Argument parsing and rendering belong in `internal/cli`; domain behavior belongs behind application interfaces and must be testable without executing the binary.
-- The same application operations must serve the CLI, HTTP API, MCP server, SSH RPC transport, and Sidecar. Do not put mailbox semantics in a transport.
-- SQLite is authoritative and `comms serve` is its sole process owner. Serialize mutations through one writer goroutine and connection; use a small read-only pool in WAL mode. Clients never open the database directly.
-- Keep a narrow application-facing store interface so use cases are testable and persistence details stay contained. SQLite is the only production implementation; do not build a runtime-selectable backend or filesystem adapter without evidence that one is needed.
-- Use a pure-Go SQLite driver so release builds remain `CGO_ENABLED=0`; the planned driver is `modernc.org/sqlite`.
-- Stable IDs are immutable. Friendly handles and topic names are mutable presentation.
-- Human output may evolve. Versioned JSON and RPC shapes are compatibility contracts.
-- Bodies come from stdin or files as well as flags; do not require agents to shell-quote multiline content.
-- Comms is operator- and local-agent-visible and trusted-local, not a privacy or adversarial security boundary. Direct topics affect inbox routing and ordinary discovery, not read access. Network exposure still defaults to loopback.
-- Never copy or share the live SQLite database between machines. Cross-machine v1 means remote access to one authoritative store.
-- Run `make check` and `git diff --check` before review.
+- `cmd/comms/`: Minimal process entrypoint only (`main.go`). Handles OS signals (`SIGINT`, `SIGTERM`) and forwards to `internal/cli`.
+- `internal/cli/`: Command-line flag parsing, human/JSON output rendering, and exit code classification. Acts as an HTTP client connecting to `comms.sock`. Never opens the database directly.
+- `internal/app/`: Core application service, transaction boundaries, and store interfaces (`AgentStore`, `TopicStore`, `MessageStore`, `MaintenanceStore`).
+- `internal/domain/`: Pure domain types (`Agent`, `Topic`, `Subscription`, `Message`), validation rules, stable ID generation (`agt_`, `top_`, `msg_`), and clocks.
+- `internal/service/`: Daemon lifecycle, exclusive advisory lock management (`comms.db.lock`), and socket/listener binding.
+- `internal/httpapi/`: Versioned HTTP API handlers (`/v1/...`) and the Unix domain socket client (`httpapi.Client`).
+- `internal/store/`: Authoritative SQLite implementation using `modernc.org/sqlite`, embedded monotonic migrations (`migrations/*.sql`), read pool, and single-writer queue (`a.runWriter`).
+- `internal/help/`: Central operation registry generating CLI usage text, agent instructions, and the OpenAPI 3.1 schema.
+- `pkg/buildinfo/`: Link-time version metadata stamped during builds.
+
+## Engineering Rules & Invariants
+
+1. **Sole SQLite Process Owner:**
+   `comms serve` is the only process that opens SQLite (`comms.db`). It enforces this via an exclusive flock on `${COMMS_STATE_DIR}/comms.db.lock`. All other commands (CLI, future MCP/Sidecar) interact with Comms as clients of the Unix domain socket HTTP API. Never open SQLite directly in CLI commands.
+2. **Serialized Single-Writer Goroutine:**
+   Database mutations are submitted as closures to a bounded channel (`requests chan writeRequest`) serviced by a single writer goroutine (`runWriter`). Request handlers never open raw write transactions or run write queries directly.
+3. **Pure-Go SQLite with WAL Mode:**
+   Release builds must remain `CGO_ENABLED=0` using `modernc.org/sqlite`. Mutations run in WAL mode (`journal_mode=WAL`), while concurrent reads are served by a dedicated read-only connection pool (`mode=ro&_pragma=query_only(1)`).
+4. **Thin CLI & Reusable Operations:**
+   Domain logic belongs behind `app.Service` and application store interfaces. Keep `internal/cli` focused on flag parsing and output formatting. Domain operations must be testable without executing the CLI binary.
+5. **Stable IDs vs. Presentation:**
+   Stable IDs (`agt_...`, `top_...`, `msg_...`) are immutable. Handles (`@alice`) and topic names are mutable presentation.
+6. **Strict Error & Output Contracts:**
+   Human-readable output may evolve; JSON envelopes (`{"schema": "...", "data": ...}`), error shapes (`{"error": {"code": "...", "message": "..."}}`), and exit codes (`0` ok, `1` internal, `2` invalid argument, `3` not found, `4` conflict, `5` unavailable/timeout) are stable compatibility contracts.
+7. **Multiline Body Input:**
+   Message bodies must accept `--body`, `--body-file`, or stdin (`-`). Agents must never be required to shell-quote multiline content.
+8. **Trusted-Local Security Model:**
+   Comms is local-first, trusted-local, and operator-visible. Direct topics route traffic to inboxes but do not create a cryptographic privacy boundary. Sockets default to `0600` permissions on loopback.
+9. **Repository Hygiene:**
+   Run `make check` (build, race-enabled tests, vet, linter) and `git diff --check` before submitting changes or requesting reviews.
 
 <!-- td-agent-instructions:start -->
 <!-- td-agent-instructions:version=3 -->
