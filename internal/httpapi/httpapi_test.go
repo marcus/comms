@@ -54,7 +54,7 @@ func TestEveryGeneratedHTTPRouteIsMounted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer response.Body.Close()
+			defer func() { _ = response.Body.Close() }()
 			if contentType := response.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") && !strings.HasPrefix(contentType, "application/x-ndjson") {
 				raw, _ := io.ReadAll(response.Body)
 				t.Fatalf("route was not served as a Comms response: status=%d content-type=%q body=%q", response.StatusCode, contentType, raw)

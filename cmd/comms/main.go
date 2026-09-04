@@ -11,13 +11,17 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	os.Exit(cli.Run(cli.Env{
+	return cli.Run(cli.Env{
 		Args:    os.Args[1:],
 		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
 		Context: ctx,
-	}))
+	})
 }

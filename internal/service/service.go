@@ -56,7 +56,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	application := app.NewService(adapter, domain.UTCClock{})
 	server := &http.Server{Handler: httpapi.NewHandler(application), ReadHeaderTimeout: 5 * time.Second}

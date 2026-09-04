@@ -345,7 +345,7 @@ func (m messageWire) expiry() (app.Expiry, error) {
 	if m.ExpiresIn != "" {
 		d, e = time.ParseDuration(m.ExpiresIn)
 		if e != nil {
-			return app.Expiry{}, fmt.Errorf("%w: invalid expires_in: %v", domain.ErrInvalid, e)
+			return app.Expiry{}, fmt.Errorf("%w: invalid expires_in: %w", domain.ErrInvalid, e)
 		}
 	}
 	return app.Expiry{Never: m.NeverExpires, At: m.ExpiresAt, After: d}, nil
@@ -558,7 +558,7 @@ func (h *Handler) decodeBody(w http.ResponseWriter, r *http.Request, target any,
 	dec := json.NewDecoder(io.LimitReader(r.Body, (1<<20)+(32<<10)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
-		h.respond(w, nil, fmt.Errorf("%w: invalid JSON body: %v", domain.ErrInvalid, err))
+		h.respond(w, nil, fmt.Errorf("%w: invalid JSON body: %w", domain.ErrInvalid, err))
 		return false
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
@@ -653,9 +653,9 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	}
 	resp, e := c.http.Do(req)
 	if e != nil {
-		return fmt.Errorf("%w: %v", app.ErrUnavailable, e)
+		return fmt.Errorf("%w: %w", app.ErrUnavailable, e)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		var envelope ErrorEnvelope
 		if e := json.NewDecoder(resp.Body).Decode(&envelope); e != nil {
@@ -701,9 +701,9 @@ func (c *Client) Export(ctx context.Context, w io.Writer) error {
 	}
 	resp, e := c.http.Do(req)
 	if e != nil {
-		return fmt.Errorf("%w: %v", app.ErrUnavailable, e)
+		return fmt.Errorf("%w: %w", app.ErrUnavailable, e)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("http %s", resp.Status)
 	}

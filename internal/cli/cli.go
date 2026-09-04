@@ -410,9 +410,10 @@ func (r *runner) topic(args []string) error {
 		}
 		body := map[string]any{}
 		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "name" {
+			switch f.Name {
+			case "name":
 				body["name"] = *name
-			} else if f.Name == "description" {
+			case "description":
 				body["description"] = *description
 			}
 		})
@@ -672,7 +673,7 @@ func (r *runner) export(args []string) error {
 		if e != nil {
 			return e
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		writer = file
 	}
 	ctx, cancel := r.callContext()
@@ -725,14 +726,15 @@ func (r *runner) identityClient() (selectedIdentity, *httpapi.Client, error) {
 func (r *runner) clientWithIdentity(required bool) (selectedIdentity, *httpapi.Client, error) {
 	var selected selectedIdentity
 	var e error
-	if required {
+	switch {
+	case required:
 		selected, e = resolveIdentity(r.g.as, r.env.Getenv)
 		if e != nil {
 			return selected, nil, usage(e.Error())
 		}
-	} else if r.g.as != "" {
+	case r.g.as != "":
 		selected = selectedIdentity{Agent: r.g.as, Source: "--as"}
-	} else {
+	default:
 		selected, _ = resolveIdentity("", r.env.Getenv)
 	}
 	socket := r.g.socket
