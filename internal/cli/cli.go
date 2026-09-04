@@ -1010,21 +1010,19 @@ func fail(env Env, jsonOutput bool, err error) int {
 	}
 	if jsonOutput {
 		stable := "internal"
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			stable = "timeout"
-		} else if errors.Is(err, httpapi.ErrServerInstanceChanged) {
+		case errors.Is(err, httpapi.ErrServerInstanceChanged):
 			stable = "server_instance_changed"
-		} else {
-			switch code {
-			case 2:
-				stable = "invalid_argument"
-			case 3:
-				stable = "not_found"
-			case 4:
-				stable = "conflict"
-			case 5:
-				stable = "unavailable"
-			}
+		case code == 2:
+			stable = "invalid_argument"
+		case code == 3:
+			stable = "not_found"
+		case code == 4:
+			stable = "conflict"
+		case code == 5:
+			stable = "unavailable"
 		}
 		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: map[string]any{}}})
 	} else {
