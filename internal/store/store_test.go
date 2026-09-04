@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -419,6 +421,96 @@ func TestRollbackDoesNotConsumeSequenceOrLeaveDirectTopic(t *testing.T) {
 		t.Fatalf("rollback consumed sequence: %d", second.Sequence)
 	}
 	_ = bob
+}
+
+func TestDirectTopicsCannotBePreclaimedLeakedOrGenericallyArchived(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	eve := join(t, sys.service, "eve", nil)
+	ref := domain.DirectExternalRef(alice.ID, bob.ID)
+	if _, err := sys.service.EnsureTopic(ctx, app.EnsureTopicRequest{ExternalRef: ref, Name: "poison"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("reserved ensure error=%v", err)
+	}
+
+	poison := createTopic(t, sys.service, "poison")
+	follow(t, sys.service, alice, poison)
+	follow(t, sys.service, bob, poison)
+	follow(t, sys.service, eve, poison)
+	_, err := sys.adapter.submit(ctx, func(conn *sql.Conn) (any, error) {
+		_, err := conn.ExecContext(ctx, "INSERT INTO topic_external_refs(namespace,external_key,topic_id) VALUES(?,?,?)", ref.Namespace, ref.Key, poison.ID)
+		return nil, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = sys.service.DirectSend(ctx, app.DirectSendRequest{Author: "alice", Recipient: "bob", Title: "secret", Body: "body"}); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("poisoned direct send error=%v", err)
+	}
+	box, err := sys.service.Inbox(ctx, app.MessageListRequest{Agent: "eve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(box.Items) != 0 {
+		t.Fatalf("poisoned direct leaked: %#v", box.Items)
+	}
+
+	clean := newTestSystem(t)
+	alice = join(t, clean.service, "alice", nil)
+	bob = join(t, clean.service, "bob", nil)
+	ref = domain.DirectExternalRef(alice.ID, bob.ID)
+	_ = createTopic(t, clean.service, "direct:"+ref.Key)
+	direct, err := clean.service.DirectSend(ctx, app.DirectSendRequest{Author: "alice", Recipient: "bob", Title: "safe", Body: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := clean.service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directTopic domain.Topic
+	for _, topic := range snapshot.Topics {
+		if topic.ID == direct.TopicID {
+			directTopic = topic
+		}
+	}
+	if directTopic.Kind != domain.TopicDirect || directTopic.Name == "direct:"+ref.Key {
+		t.Fatalf("direct collision fallback=%#v", directTopic)
+	}
+	if _, err = clean.service.ArchiveTopic(ctx, app.ArchiveTopicRequest{Topic: string(direct.TopicID)}); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("direct archive error=%v", err)
+	}
+}
+
+func TestUnicodeTopicIdentityAndLiteralSearch(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	_ = createTopic(t, sys.service, "CAFÉ")
+	if _, err := sys.service.CreateTopic(ctx, app.CreateTopicRequest{Name: "café"}); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("Unicode case collision error=%v", err)
+	}
+	long := strings.Repeat("é", 64)
+	_ = createTopic(t, sys.service, long)
+	ensured, err := sys.service.EnsureTopic(ctx, app.EnsureTopicRequest{ExternalRef: app.ExternalRef{Namespace: "sidecar", Key: "unicode"}, Name: long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(ensured.Topic.Name) || len(ensured.Topic.Name) > domain.MaxTopicName {
+		t.Fatalf("invalid suffixed topic %q", ensured.Topic.Name)
+	}
+
+	alice := join(t, sys.service, "alice", nil)
+	topic := createTopic(t, sys.service, "search")
+	follow(t, sys.service, alice, topic)
+	if _, err = sys.service.Publish(ctx, app.PublishRequest{Author: "alice", Topic: "search", Title: "hello-world", Body: `a quoted " phrase`}); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"hello-world", `"`} {
+		if _, err = sys.service.Search(ctx, app.SearchRequest{Query: query}); err != nil {
+			t.Fatalf("literal search %q: %v", query, err)
+		}
+	}
 }
 
 func TestBoundedWriterQueueAndClose(t *testing.T) {

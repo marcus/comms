@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestTypedIDs(t *testing.T) {
@@ -40,6 +41,12 @@ func TestValidationBoundaries(t *testing.T) {
 		{"metadata invalid", func() error {
 			return Message{ID: messageID, TopicID: topicID, AuthorID: agentID, ThreadRootID: messageID, Body: "body", Metadata: json.RawMessage("{")}.Validate(true)
 		}, false},
+		{"metadata scalar", func() error {
+			return Message{ID: messageID, TopicID: topicID, AuthorID: agentID, ThreadRootID: messageID, Body: "body", Metadata: json.RawMessage(`"scalar"`)}.Validate(true)
+		}, false},
+		{"metadata object", func() error {
+			return Message{ID: messageID, TopicID: topicID, AuthorID: agentID, ThreadRootID: messageID, Body: "body", Metadata: json.RawMessage(`{"source":"test"}`)}.Validate(true)
+		}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -48,6 +55,17 @@ func TestValidationBoundaries(t *testing.T) {
 				t.Fatalf("error=%v valid=%v", err, tt.valid)
 			}
 		})
+	}
+}
+
+func TestTopicNameKeysAndTruncationAreUnicodeSafe(t *testing.T) {
+	if TopicNameKey("CAFÉ") != TopicNameKey("café") {
+		t.Fatal("topic key is not Unicode case folded")
+	}
+	value := strings.Repeat("é", 64)
+	truncated := TruncateUTF8Bytes(value, 127)
+	if !utf8.ValidString(truncated) || len(truncated) > 127 {
+		t.Fatalf("invalid truncation %q (%d bytes)", truncated, len(truncated))
 	}
 }
 

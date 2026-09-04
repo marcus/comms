@@ -188,7 +188,7 @@ func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now 
 
 func (a *Adapter) CreateTopic(ctx context.Context, req app.CreateTopicRequest, t domain.Topic, now time.Time) (domain.Topic, error) {
 	return withMutation(ctx, a, req.Mutation, "create_topic", now, func(tx *sql.Tx) (domain.Topic, error) {
-		_, e := tx.ExecContext(ctx, "INSERT INTO topics("+topicCols+") VALUES(?,?,?,?,?,?,?,NULL)", t.ID, t.Name, t.Kind, t.Description, t.NextSequence, micros(now), micros(now))
+		_, e := tx.ExecContext(ctx, "INSERT INTO topics("+topicInsertCols+") VALUES(?,?,?,?,?,?,?,?,NULL)", t.ID, t.Name, domain.TopicNameKey(t.Name), t.Kind, t.Description, t.NextSequence, micros(now), micros(now))
 		return t, e
 	})
 }
@@ -207,7 +207,7 @@ func (a *Adapter) EnsureTopic(ctx context.Context, req app.EnsureTopicRequest, f
 		base := fresh.Name
 		for suffix := 1; ; suffix++ {
 			var used int
-			e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM topics WHERE name=? COLLATE NOCASE)", fresh.Name).Scan(&used)
+			e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM topics WHERE name_key=?)", domain.TopicNameKey(fresh.Name)).Scan(&used)
 			if e != nil {
 				return app.EnsureTopicResponse{}, e
 			}
@@ -219,13 +219,10 @@ func (a *Adapter) EnsureTopic(ctx context.Context, req app.EnsureTopicRequest, f
 			if max < 1 {
 				return app.EnsureTopicResponse{}, fmt.Errorf("%w: topic name collision cannot be suffixed", app.ErrConflict)
 			}
-			name := base
-			if len(name) > max {
-				name = name[:max]
-			}
+			name := domain.TruncateUTF8Bytes(base, max)
 			fresh.Name = name + tail
 		}
-		if _, e = tx.ExecContext(ctx, "INSERT INTO topics("+topicCols+") VALUES(?,?,?,?,?,?,?,NULL)", fresh.ID, fresh.Name, fresh.Kind, fresh.Description, 1, micros(now), micros(now)); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO topics("+topicInsertCols+") VALUES(?,?,?,?,?,?,?,?,NULL)", fresh.ID, fresh.Name, domain.TopicNameKey(fresh.Name), fresh.Kind, fresh.Description, 1, micros(now), micros(now)); e != nil {
 			return app.EnsureTopicResponse{}, e
 		}
 		if _, e = tx.ExecContext(ctx, "INSERT INTO topic_external_refs(namespace,external_key,topic_id) VALUES(?,?,?)", req.ExternalRef.Namespace, req.ExternalRef.Key, fresh.ID); e != nil {
@@ -251,9 +248,26 @@ func (a *Adapter) UpdateTopic(ctx context.Context, req app.UpdateTopicRequest, n
 		if e = t.Validate(); e != nil {
 			return t, e
 		}
-		_, e = tx.ExecContext(ctx, "UPDATE topics SET name=?,description=?,updated_at=? WHERE id=?", t.Name, t.Description, micros(now), t.ID)
+		_, e = tx.ExecContext(ctx, "UPDATE topics SET name=?,name_key=?,description=?,updated_at=? WHERE id=?", t.Name, domain.TopicNameKey(t.Name), t.Description, micros(now), t.ID)
 		return t, e
 	})
+}
+
+func uniqueTopicName(ctx context.Context, tx *sql.Tx, base string) (string, error) {
+	for suffix := 1; ; suffix++ {
+		name := base
+		if suffix > 1 {
+			tail := "-" + strconv.Itoa(suffix)
+			name = domain.TruncateUTF8Bytes(base, domain.MaxTopicName-len(tail)) + tail
+		}
+		var used int
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM topics WHERE name_key=?)", domain.TopicNameKey(name)).Scan(&used); err != nil {
+			return "", err
+		}
+		if used == 0 {
+			return name, nil
+		}
+	}
 }
 func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest, now time.Time) (domain.Topic, error) {
 	return withMutation(ctx, a, req.Mutation, "archive_topic", now, func(tx *sql.Tx) (domain.Topic, error) {
@@ -262,6 +276,9 @@ func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest,
 			return t, e
 		}
 		if t.ArchivedAt == nil {
+			if t.Kind == domain.TopicDirect {
+				return t, fmt.Errorf("%w: direct topics close only when a participant retires", app.ErrConflict)
+			}
 			t.ArchivedAt = &now
 			t.UpdatedAt = now
 			_, e = tx.ExecContext(ctx, "UPDATE topics SET archived_at=?,updated_at=? WHERE id=?", micros(now), micros(now), t.ID)
@@ -275,7 +292,7 @@ func (a *Adapter) ListTopics(ctx context.Context, req app.TopicListRequest, agen
 	if e != nil {
 		return app.Page[domain.Topic]{}, e
 	}
-	query := "SELECT " + topicCols + " FROM topics t WHERE (? OR archived_at IS NULL) AND (kind='public' OR (? AND EXISTS(SELECT 1 FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=t.id AND a.id=?))) AND (?='' OR lower(name)>lower(?) OR (lower(name)=lower(?) AND id>?)) ORDER BY lower(name),id LIMIT ?"
+	query := "SELECT " + topicCols + " FROM topics t WHERE (? OR archived_at IS NULL) AND (kind='public' OR (? AND EXISTS(SELECT 1 FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=t.id AND a.id=?))) AND (?='' OR name_key>? OR (name_key=? AND id>?)) ORDER BY name_key,id LIMIT ?"
 	rows, e := a.read.QueryContext(ctx, query, req.IncludeArchived, req.IncludeDirect, agent, p[0], p[0], p[0], p[1], req.Limit+1)
 	if e != nil {
 		return app.Page[domain.Topic]{}, e
@@ -295,7 +312,7 @@ func (a *Adapter) ListTopics(ctx context.Context, req app.TopicListRequest, agen
 	if len(out.Items) > req.Limit {
 		last := out.Items[req.Limit-1]
 		out.Items = out.Items[:req.Limit]
-		out.NextCursor = encodeCursor(strings.ToLower(last.Name), string(last.ID))
+		out.NextCursor = encodeCursor(domain.TopicNameKey(last.Name), string(last.ID))
 	}
 	return out, nil
 }

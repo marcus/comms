@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/text/cases"
 )
 
 const (
@@ -255,6 +257,12 @@ func (m Message) Validate(reply bool) error {
 	if len(m.Metadata) > 0 && !json.Valid(m.Metadata) {
 		return fmt.Errorf("%w: metadata is not valid JSON", ErrInvalid)
 	}
+	if len(m.Metadata) > 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(m.Metadata, &object); err != nil || object == nil {
+			return fmt.Errorf("%w: metadata must be a JSON object", ErrInvalid)
+		}
+	}
 	return nil
 }
 
@@ -277,6 +285,20 @@ func DirectExternalRef(a, b AgentID) ExternalRef {
 		parts[0], parts[1] = parts[1], parts[0]
 	}
 	return ExternalRef{Namespace: "direct", Key: parts[0] + "." + parts[1]}
+}
+
+// TopicNameKey is the storage-independent Unicode case-folded topic identity.
+func TopicNameKey(name string) string { return cases.Fold().String(name) }
+
+// TruncateUTF8Bytes shortens text without splitting a UTF-8 encoding.
+func TruncateUTF8Bytes(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	for max > 0 && !utf8.RuneStart(value[max]) {
+		max--
+	}
+	return value[:max]
 }
 
 func DefaultExpiry(created time.Time) *time.Time { v := created.UTC().Add(DefaultRetention); return &v }

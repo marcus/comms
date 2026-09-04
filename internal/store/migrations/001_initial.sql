@@ -8,7 +8,7 @@ CREATE TABLE agents(
 CREATE TABLE agent_external_refs(namespace TEXT NOT NULL, external_key TEXT NOT NULL, agent_id TEXT NOT NULL REFERENCES agents(id), PRIMARY KEY(namespace, external_key));
 CREATE TABLE agent_aliases(handle TEXT PRIMARY KEY COLLATE NOCASE, agent_id TEXT NOT NULL REFERENCES agents(id), expires_at INTEGER NOT NULL);
 CREATE TABLE topics(
-  id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, kind TEXT NOT NULL CHECK(kind IN ('public','direct')),
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL CHECK(kind IN ('public','direct')),
   description TEXT NOT NULL DEFAULT '', next_sequence INTEGER NOT NULL DEFAULT 1 CHECK(next_sequence > 0),
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER
 );

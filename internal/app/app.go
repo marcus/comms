@@ -471,6 +471,9 @@ func (s *Service) EnsureTopic(ctx context.Context, req EnsureTopicRequest) (Ensu
 	if e := req.ExternalRef.Validate(); e != nil {
 		return EnsureTopicResponse{}, e
 	}
+	if req.ExternalRef.Namespace == "direct" {
+		return EnsureTopicResponse{}, fmt.Errorf("%w: external namespace direct is reserved", domain.ErrInvalid)
+	}
 	id, e := domain.NewTopicID()
 	if e != nil {
 		return EnsureTopicResponse{}, e

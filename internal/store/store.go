@@ -432,11 +432,12 @@ func scanTopic(s interface{ Scan(...any) error }) (domain.Topic, error) {
 }
 
 const topicCols = "id,name,kind,description,next_sequence,created_at,updated_at,archived_at"
+const topicInsertCols = "id,name,name_key,kind,description,next_sequence,created_at,updated_at,archived_at"
 
 func resolveTopic(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, ref string) (domain.Topic, error) {
-	t, e := scanTopic(q.QueryRowContext(ctx, "SELECT "+topicCols+" FROM topics WHERE id=? OR name=? COLLATE NOCASE LIMIT 1", ref, ref))
+	t, e := scanTopic(q.QueryRowContext(ctx, "SELECT "+topicCols+" FROM topics WHERE id=? OR name_key=? LIMIT 1", ref, domain.TopicNameKey(ref)))
 	if errors.Is(e, sql.ErrNoRows) {
 		return t, fmt.Errorf("%w: topic %q", app.ErrNotFound, ref)
 	}

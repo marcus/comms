@@ -100,9 +100,12 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (domain
 			if e != nil {
 				return domain.Message{}, e
 			}
-			name := "direct:" + ref.Key
+			name, e := uniqueTopicName(ctx, tx, "direct:"+ref.Key)
+			if e != nil {
+				return domain.Message{}, e
+			}
 			topic = domain.Topic{ID: id, Name: name, Kind: domain.TopicDirect, NextSequence: 1, CreatedAt: p.Now, UpdatedAt: p.Now}
-			if _, e = tx.ExecContext(ctx, "INSERT INTO topics("+topicCols+") VALUES(?,?,?,?,1,?,?,NULL)", topic.ID, topic.Name, topic.Kind, "", micros(p.Now), micros(p.Now)); e != nil {
+			if _, e = tx.ExecContext(ctx, "INSERT INTO topics("+topicInsertCols+") VALUES(?,?,?,?,?,1,?,?,NULL)", topic.ID, topic.Name, domain.TopicNameKey(topic.Name), topic.Kind, "", micros(p.Now), micros(p.Now)); e != nil {
 				return domain.Message{}, e
 			}
 			if _, e = tx.ExecContext(ctx, "INSERT INTO topic_external_refs(namespace,external_key,topic_id) VALUES(?,?,?)", ref.Namespace, ref.Key, topic.ID); e != nil {
@@ -120,14 +123,14 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (domain
 			if e != nil {
 				return domain.Message{}, e
 			}
-			if topic.ArchivedAt != nil {
-				return domain.Message{}, fmt.Errorf("%w: direct topic is archived", app.ErrConflict)
+			if topic.ArchivedAt != nil || topic.Kind != domain.TopicDirect {
+				return domain.Message{}, fmt.Errorf("%w: direct topic is archived or inconsistent", app.ErrConflict)
 			}
-			var members int
-			if e = tx.QueryRowContext(ctx, "SELECT count(*) FROM subscriptions WHERE topic_id=? AND unfollowed_at IS NULL AND agent_id IN (?,?)", topic.ID, author.ID, recipient.ID).Scan(&members); e != nil {
+			var members, participants int
+			if e = tx.QueryRowContext(ctx, "SELECT count(*),COALESCE(sum(CASE WHEN agent_id IN (?,?) THEN 1 ELSE 0 END),0) FROM subscriptions WHERE topic_id=? AND unfollowed_at IS NULL", author.ID, recipient.ID, topic.ID).Scan(&members, &participants); e != nil {
 				return domain.Message{}, e
 			}
-			if members != 2 {
+			if members != 2 || participants != 2 {
 				return domain.Message{}, fmt.Errorf("%w: direct topic membership is inconsistent", app.ErrConflict)
 			}
 		}
@@ -396,7 +399,15 @@ func (a *Adapter) Search(ctx context.Context, req app.SearchRequest, now time.Ti
 		topicID = string(t.ID)
 	}
 	query := "SELECT " + prefixedMessageCols("m") + " FROM messages_fts f JOIN messages m ON m.id=f.message_id WHERE messages_fts MATCH ? AND (m.expires_at IS NULL OR m.expires_at>?) AND (?='' OR m.author_id=?) AND (?='' OR m.topic_id=?) AND (?=0 OR m.created_at<? OR (m.created_at=? AND m.id<?)) ORDER BY m.created_at DESC,m.id DESC LIMIT ?"
-	return pageMessages(ctx, a.read, query, []any{req.Query, micros(now), fromID, fromID, topicID, topicID, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
+	return pageMessages(ctx, a.read, query, []any{literalFTSQuery(req.Query), micros(now), fromID, fromID, topicID, topicID, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
+}
+
+func literalFTSQuery(input string) string {
+	terms := strings.Fields(input)
+	for i, term := range terms {
+		terms[i] = `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
+	}
+	return strings.Join(terms, " ")
 }
 func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.Time) (app.Page[domain.Message], error) {
 	stamp, id, e := descendingCursor(req.Cursor)
