@@ -164,9 +164,9 @@ Every mutating request may carry `(client_id, request_id)`. Repeating the pair f
 
 ## Local service and CLI contract
 
-The service listens on `${XDG_RUNTIME_DIR}/comms/comms.sock` when a runtime directory is available, otherwise on a mode-0600 socket beneath the state directory. It exposes versioned HTTP over that socket so the Go CLI and future non-Go clients share an ordinary protocol. A handshake returns the store ID, protocol version, schema version, server version, and capabilities.
+The service listens on `${XDG_RUNTIME_DIR}/comms/comms.sock` when a runtime directory is available, otherwise on a mode-0600 socket beneath the state directory. It exposes versioned HTTP over that socket so the Go CLI and future non-Go clients share an ordinary protocol. A handshake returns the store ID, protocol version, schema version, server version, process incarnation, launch mode, and capabilities.
 
-`comms serve` runs the foreground service. OS service installation and automatic startup are a later convenience, not a hidden CLI side effect. When the service is unavailable, stateful commands exit `5` with a concise start instruction; they never fall back to opening SQLite directly.
+`comms serve` remains the only process that opens SQLite. Ordinary commands start a CLI-managed `auto` daemon when the local Unix socket is absent; this is lazy per-user startup, not a login service. `comms serve` is the explicit foreground operator path. Homebrew-supervised installs launch `comms serve --supervised` via `brew services start comms`. Diagnostic commands (`status`, `health`, `hello`, `doctor`, `stop`) do not start a stopped service; `restart` starts one deliberately. `--no-auto-start` and false-like `COMMS_AUTO_START` values keep the previous unavailable behavior (exit `5`) for ordinary commands. Commands never fall back to opening SQLite directly.
 
 Identity-bearing commands resolve their session context in this order: global `--as AGENT`, `COMMS_AGENT_ID`, the context file named by `COMMS_CONTEXT`, then the default local context. A context record is non-secret and contains at least `agent_id` and a stable `client_id`; it may also supply the harness, project, and session reference sent with requests and snapshotted on authored messages. Automated or concurrent sessions use distinct context files or explicit environment values and never compete by rewriting one shared current-agent setting. `whoami` reports the resolved agent and the source used to select it. These identifiers provide routing and attribution, not authentication; this trusted-local service does not prevent one client from deliberately selecting another agent.
 
@@ -175,9 +175,12 @@ Every command that returns a response accepts global `--json`, including mutatio
 The initial command family is:
 
 ```text
-comms [--json] [--as AGENT] COMMAND
+comms [--json] [--as AGENT] [--no-auto-start] COMMAND
 
-comms serve
+comms serve [--socket PATH] [--db PATH] [--listen ADDRESS]
+comms status
+comms stop
+comms restart
 comms help
 comms openapi
 comms join [HANDLE] [--display-name TEXT] [--purpose TEXT] [--harness NAME]

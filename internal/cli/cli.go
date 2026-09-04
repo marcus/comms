@@ -147,6 +147,12 @@ func (r *runner) run(args []string) error {
 		return nil
 	case "serve":
 		return r.serve(args[1:])
+	case "status":
+		return r.status(args[1:])
+	case "stop":
+		return r.stop(args[1:])
+	case "restart":
+		return r.restart(args[1:])
 	case "hello":
 		return r.get("/v1/hello", nil, false)
 	case "health":
@@ -240,6 +246,51 @@ func (r *runner) serve(args []string) error {
 		}
 	}
 	return service.Run(r.env.Context, service.Config{DatabasePath: *database, SocketPath: path, Listen: *listen, LaunchMode: mode})
+}
+
+func (r *runner) status(args []string) error {
+	if len(args) != 0 {
+		return usage("status accepts no arguments")
+	}
+	report, err := r.inspectStatus()
+	if err != nil {
+		return err
+	}
+	return r.printStatus(report)
+}
+
+func (r *runner) stop(args []string) error {
+	if len(args) != 0 {
+		return usage("stop accepts no arguments")
+	}
+	client, err := r.client(false)
+	if err != nil {
+		return err
+	}
+	didStop, err := r.stopService(client)
+	if err != nil {
+		return err
+	}
+	socket, err := r.resolveSocket()
+	if err != nil {
+		return err
+	}
+	return r.printStopped(socket, didStop)
+}
+
+func (r *runner) restart(args []string) error {
+	if len(args) != 0 {
+		return usage("restart accepts no arguments")
+	}
+	client, err := r.client(false)
+	if err != nil {
+		return err
+	}
+	report, err := r.liveStatus(client)
+	if err != nil {
+		return err
+	}
+	return r.printStatus(report)
 }
 
 func (r *runner) join(args []string) error {
@@ -801,7 +852,7 @@ func (r *runner) clientWithIdentity(required bool) (selectedIdentity, *httpapi.C
 		return selected, nil, e
 	}
 	client := httpapi.NewUnixClient(socket, selected.Agent)
-	if r.policy == policyAutoStart {
+	if r.policy == policyAutoStart || r.policy == policyRestart {
 		if e = r.ensureReady(client); e != nil {
 			return selected, nil, e
 		}

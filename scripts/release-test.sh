@@ -68,6 +68,14 @@ sha=0000000000000000000000000000000000000000000000000000000000000000
   v1.2.3 "$sha" "$temporary/expected/comms.rb" >/dev/null
 grep -Fq 'ENV["CGO_ENABLED"] = "0"' "$temporary/expected/comms.rb" ||
   fail "formula does not force CGO_ENABLED=0"
+grep -Fq 'run [opt_bin/"comms", "serve", "--supervised"]' "$temporary/expected/comms.rb" ||
+  fail "formula service command is not serve --supervised via opt_bin"
+grep -Fq 'run_at_load true' "$temporary/expected/comms.rb" ||
+  fail "formula service does not run at load"
+grep -Fq 'keep_alive true' "$temporary/expected/comms.rb" ||
+  fail "formula service does not keep alive"
+grep -Fq 'opt_bin/"comms"' "$temporary/expected/comms.rb" ||
+  fail "formula service does not use opt_bin"
 check_formula_transition \
   "$temporary/current/missing.rb" "$temporary/expected/comms.rb" v1.2.3 ||
   fail "rejected first formula publication"

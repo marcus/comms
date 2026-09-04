@@ -76,7 +76,10 @@ func route(method, path string) *HTTPBinding { return &HTTPBinding{Method: metho
 // registry is the single authored catalog. CLI usage, capability JSON,
 // OpenAPI, MCP tools, and agent instructions are all generated from it.
 var registry = []Operation{
-	{ID: "service.serve", Category: "Service", Summary: "Run the local Comms service", Description: "Runs the foreground process that exclusively owns the SQLite store.", CLI: "serve [--socket PATH] [--db PATH] [--listen ADDRESS]"},
+	{ID: "service.serve", Category: "Service", Summary: "Run the local Comms service", Description: "Runs the process that exclusively owns the SQLite store. --daemon-child and --supervised are launch-mode markers for CLI-managed and Homebrew-supervised processes; they are not alternate database owners.", CLI: "serve [--socket PATH] [--db PATH] [--listen ADDRESS]"},
+	{ID: "service.status", Category: "Service", Summary: "Show whether the local service is running", Description: "Reports live handshake facts for the local service. Does not start a stopped service. A stopped service is a successful running:false result.", CLI: "status"},
+	{ID: "service.stop", Category: "Service", Summary: "Stop the local service", Description: "Stops a lifecycle-aware auto or foreground service. Already stopped is success. Supervised Homebrew processes must be stopped with brew services stop comms; a legacy server must be stopped once by the operator.", CLI: "stop"},
+	{ID: "service.restart", Category: "Service", Summary: "Restart the local service", Description: "Stops a lifecycle-aware auto or foreground service if present, then starts a CLI-managed auto daemon. Supervised Homebrew processes must be restarted with brew services restart comms. --no-auto-start does not prevent this explicit restart.", CLI: "restart"},
 	{ID: "service.shutdown", Category: "Service", Summary: "Shut down a matching service incarnation", Description: "Requests a graceful stop of the Unix-socket service identified by server_instance_id. The route is not exposed by a TCP listener. Shutdown begins after the response is committed.", HTTP: route("POST", "/v1/admin/shutdown"), UnixOnly: true, Parameters: []Parameter{
 		p("server_instance_id", "Expected process incarnation from GET /v1/hello.", "string", BodyParameter, true),
 	}},

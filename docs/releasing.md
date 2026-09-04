@@ -87,3 +87,12 @@ git -C "$(brew --repository marcus/tap)" show origin/main:Formula/comms.rb
 
 The release is complete only after the public binary and Homebrew test report
 the requested version and a clean-store black-box CLI conversation succeeds.
+
+## First lifecycle-aware upgrade
+
+v1.0.0 has no shutdown operation and no process incarnation. After installing a
+later release, stop that foreground `comms serve` process once. The next
+ordinary command, or `comms restart`, starts the lifecycle-aware daemon.
+
+Homebrew-supervised installs should use `brew services restart comms` rather
+than `comms restart`. The CLI refuses to race the supervisor.

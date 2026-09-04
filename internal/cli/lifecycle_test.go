@@ -123,6 +123,9 @@ func TestCommandPolicyMatrix(t *testing.T) {
 		{command: "hello", want: policyInspectOnly},
 		{command: "health", want: policyInspectOnly},
 		{command: "doctor", want: policyInspectOnly},
+		{command: "status", want: policyInspectOnly},
+		{command: "stop", want: policyInspectOnly},
+		{command: "restart", want: policyRestart},
 		{command: "join", want: policyAutoStart},
 		{command: "whoami", want: policyAutoStart},
 		{command: "agents", want: policyAutoStart},
@@ -168,6 +171,8 @@ func TestPolicyDispatchDoesNotSpawnForProcessLocalOrInspect(t *testing.T) {
 		{name: "hello", args: []string{"--socket", iso.socket, "hello"}, code: 5},
 		{name: "health", args: []string{"--socket", iso.socket, "health"}, code: 5},
 		{name: "doctor", args: []string{"--socket", iso.socket, "doctor"}, code: 5},
+		{name: "status", args: []string{"--socket", iso.socket, "status"}, code: 0},
+		{name: "stop", args: []string{"--socket", iso.socket, "stop"}, code: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -190,6 +195,8 @@ func TestAutoStartEligibleCommandsSpawnOnMissingSocket(t *testing.T) {
 		{"--socket", iso.socket, "join", "alice"},
 		{"--socket", iso.socket, "agents"},
 		{"--socket", iso.socket, "export"},
+		{"--socket", iso.socket, "restart"},
+		{"--no-auto-start", "--socket", iso.socket, "restart"},
 	} {
 		t.Run(args[len(args)-1], func(t *testing.T) {
 			before := len(spawn.calls())

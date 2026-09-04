@@ -110,6 +110,21 @@ func TestReplacementDecision(t *testing.T) {
 	}
 }
 
+func TestRestartDecisionReplacesAutoAndForeground(t *testing.T) {
+	if got := restartDecision(help.Handshake{ServerInstanceID: "srv_auto", LaunchMode: "auto"}); got != replaceAuto {
+		t.Fatalf("auto=%s", got)
+	}
+	if got := restartDecision(help.Handshake{ServerInstanceID: "srv_fg", LaunchMode: "foreground"}); got != replaceAuto {
+		t.Fatalf("foreground=%s", got)
+	}
+	if got := restartDecision(help.Handshake{ServerInstanceID: "srv_sup", LaunchMode: "supervised"}); got != replaceSupervised {
+		t.Fatalf("supervised=%s", got)
+	}
+	if got := restartDecision(help.Handshake{}); got != replaceLegacy {
+		t.Fatalf("legacy=%s", got)
+	}
+}
+
 func TestOwnerLockReleased(t *testing.T) {
 	dir := shortTempDir(t)
 	path := filepath.Join(dir, "comms.db.lock")

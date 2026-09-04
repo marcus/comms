@@ -27,6 +27,7 @@ const (
 	policyProcessLocal commandPolicy = iota
 	policyInspectOnly
 	policyAutoStart
+	policyRestart
 )
 
 // DaemonSpec is the process-creation request the spawn adapter executes.
@@ -93,6 +94,16 @@ func legacyServerRestartRequired() error {
 	}
 }
 
+func supervisedControlRequired(verb string) error {
+	action := "run 'brew services " + verb + " comms'"
+	return &restartRequiredError{
+		code:       "server_restart_required",
+		launchMode: string(service.LaunchModeSupervised),
+		action:     action,
+		message:    "running supervised Comms service is owned by Homebrew; " + action,
+	}
+}
+
 func startupFailure(phase, logPath string, err error) error {
 	if err == nil {
 		err = app.ErrUnavailable
@@ -107,8 +118,10 @@ func commandPolicyOf(command string) commandPolicy {
 	switch command {
 	case "help", "-h", "--help", "version", "openapi", "capabilities", "instructions", "serve":
 		return policyProcessLocal
-	case "hello", "health", "doctor":
+	case "hello", "health", "doctor", "status", "stop":
 		return policyInspectOnly
+	case "restart":
+		return policyRestart
 	case "join", "whoami", "agents", "agent", "topic", "topics", "subscriptions", "publish", "send", "reply", "inbox", "peek", "read-through", "receipts", "thread", "search", "observe", "retention", "purge", "export":
 		return policyAutoStart
 	default:
@@ -197,20 +210,23 @@ func (r *runner) ensureReady(client *httpapi.Client) error {
 		if err := checkHandshakeCompatibility(hs); err != nil {
 			return err
 		}
-		switch r.replacementDecision(hs) {
+		switch r.lifecycleDecision(hs) {
 		case replaceNone:
 			return nil
 		case replaceLegacy:
 			return legacyServerRestartRequired()
 		case replaceForeground, replaceSupervised:
-			return serverRestartRequired(hs.LaunchMode)
+			return r.refuseLaunchMode(hs.LaunchMode)
 		case replaceAuto:
 			return r.reconcile(ctx, client)
 		default:
 			return nil
 		}
 	}
-	if !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) || !httpapi.IsAutoStartableDial(err) {
+	if !httpapi.IsAutoStartableDial(err) {
+		return err
+	}
+	if r.policy != policyRestart && !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
 		return err
 	}
 	return r.reconcile(ctx, client)
@@ -236,13 +252,13 @@ func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, lo
 			if err := checkHandshakeCompatibility(hs); err != nil {
 				return err
 			}
-			switch r.replacementDecision(hs) {
+			switch r.lifecycleDecision(hs) {
 			case replaceNone:
 				return nil
 			case replaceLegacy:
 				return legacyServerRestartRequired()
 			case replaceForeground, replaceSupervised:
-				return serverRestartRequired(hs.LaunchMode)
+				return r.refuseLaunchMode(hs.LaunchMode)
 			case replaceAuto:
 				if err := shutdownInstance(ctx, client, hs.ServerInstanceID); err != nil {
 					if errors.Is(err, httpapi.ErrServerInstanceChanged) {
@@ -292,6 +308,27 @@ func checkHandshakeCompatibility(hs help.Handshake) error {
 	return nil
 }
 
+func (r *runner) lifecycleDecision(hs help.Handshake) replaceAction {
+	if r.policy == policyRestart {
+		return restartDecision(hs)
+	}
+	return r.replacementDecision(hs)
+}
+
+func restartDecision(hs help.Handshake) replaceAction {
+	if hs.ServerInstanceID == "" || hs.LaunchMode == "" {
+		return replaceLegacy
+	}
+	switch hs.LaunchMode {
+	case string(service.LaunchModeAuto), string(service.LaunchModeForeground):
+		return replaceAuto
+	case string(service.LaunchModeSupervised):
+		return replaceSupervised
+	default:
+		return replaceForeground
+	}
+}
+
 func (r *runner) replacementDecision(hs help.Handshake) replaceAction {
 	if !isNewerStable(r.buildVersion(), hs.ServerVersion) {
 		return replaceNone
@@ -312,6 +349,18 @@ func (r *runner) replacementDecision(hs help.Handshake) replaceAction {
 	default:
 		return replaceForeground
 	}
+}
+
+func (r *runner) refuseLaunchMode(launchMode string) error {
+	if launchMode == string(service.LaunchModeSupervised) {
+		switch r.policy {
+		case policyRestart:
+			return supervisedControlRequired("restart")
+		case policyInspectOnly:
+			return supervisedControlRequired("stop")
+		}
+	}
+	return serverRestartRequired(launchMode)
 }
 
 var stableSemver = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
@@ -543,4 +592,164 @@ func (r *runner) serverLogPath() string {
 		return "server.log"
 	}
 	return filepath.Join(dir, "server.log")
+}
+
+type statusReport struct {
+	Running          bool      `json:"running"`
+	ServerInstanceID string    `json:"server_instance_id,omitempty"`
+	PID              int       `json:"pid,omitempty"`
+	StartedAt        time.Time `json:"started_at,omitempty"`
+	LaunchMode       string    `json:"launch_mode,omitempty"`
+	Version          string    `json:"version,omitempty"`
+	Commit           string    `json:"commit,omitempty"`
+	SocketPath       string    `json:"socket_path,omitempty"`
+	DatabasePath     string    `json:"database_path,omitempty"`
+}
+
+func statusFromHandshake(hs help.Handshake, fallbackSocket string) statusReport {
+	socket := hs.SocketPath
+	if socket == "" {
+		socket = fallbackSocket
+	}
+	report := statusReport{
+		Running:          true,
+		ServerInstanceID: hs.ServerInstanceID,
+		PID:              hs.PID,
+		LaunchMode:       hs.LaunchMode,
+		Version:          hs.ServerVersion,
+		Commit:           hs.Commit,
+		SocketPath:       socket,
+		DatabasePath:     hs.DatabasePath,
+	}
+	if !hs.StartedAt.IsZero() {
+		report.StartedAt = hs.StartedAt.UTC()
+	}
+	return report
+}
+
+func (r *runner) inspectStatus() (statusReport, error) {
+	socket, err := r.resolveSocket()
+	if err != nil {
+		return statusReport{}, err
+	}
+	client := httpapi.NewUnixClient(socket, "")
+	hs, err := handshake(r.commandContext(), client)
+	if err != nil {
+		if httpapi.IsAutoStartableDial(err) {
+			return statusReport{Running: false, SocketPath: socket}, nil
+		}
+		return statusReport{}, err
+	}
+	if err := checkHandshakeCompatibility(hs); err != nil {
+		return statusReport{}, err
+	}
+	return statusFromHandshake(hs, socket), nil
+}
+
+func (r *runner) liveStatus(client *httpapi.Client) (statusReport, error) {
+	socket, err := r.resolveSocket()
+	if err != nil {
+		return statusReport{}, err
+	}
+	hs, err := handshake(r.commandContext(), client)
+	if err != nil {
+		return statusReport{}, err
+	}
+	if err := checkHandshakeCompatibility(hs); err != nil {
+		return statusReport{}, err
+	}
+	return statusFromHandshake(hs, socket), nil
+}
+
+func (r *runner) printStatus(report statusReport) error {
+	if r.g.json {
+		return r.output(report)
+	}
+	if !report.Running {
+		_, err := fmt.Fprintln(r.env.Stdout, "comms is not running")
+		return err
+	}
+	_, err := fmt.Fprintf(r.env.Stdout, "comms is running (pid %d, %s, %s)\n", report.PID, report.LaunchMode, report.Version)
+	return err
+}
+
+func (r *runner) printStopped(socket string, didStop bool) error {
+	if r.g.json {
+		return r.output(statusReport{Running: false, SocketPath: socket})
+	}
+	msg := "comms is not running"
+	if didStop {
+		msg = "stopped"
+	}
+	_, err := fmt.Fprintln(r.env.Stdout, msg)
+	return err
+}
+
+func (r *runner) stopService(client *httpapi.Client) (didStop bool, err error) {
+	ctx := r.commandContext()
+	logPath := r.serverLogPath()
+	hs, err := handshake(ctx, client)
+	if err != nil {
+		if httpapi.IsAutoStartableDial(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := checkHandshakeCompatibility(hs); err != nil {
+		return false, err
+	}
+	if err := r.stoppableHandshake(hs); err != nil {
+		return false, err
+	}
+
+	lock, err := acquireLifecycleLock(ctx, r.socket+".lifecycle.lock")
+	if err != nil {
+		return false, startupFailure("lock", logPath, err)
+	}
+	defer func() { _ = lock.Close() }()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, startupFailure("shutdown", logPath, err)
+		}
+		hs, err := handshake(ctx, client)
+		if err != nil {
+			if httpapi.IsAutoStartableDial(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		if err := checkHandshakeCompatibility(hs); err != nil {
+			return false, err
+		}
+		if err := r.stoppableHandshake(hs); err != nil {
+			return false, err
+		}
+		if err := shutdownInstance(ctx, client, hs.ServerInstanceID); err != nil {
+			if errors.Is(err, httpapi.ErrServerInstanceChanged) {
+				continue
+			}
+			if !httpapi.IsAutoStartableDial(err) && !retryableTransportError(err) {
+				return false, err
+			}
+		}
+		if err := r.waitUntilReleased(ctx, client, hs.ServerInstanceID, logPath); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+}
+
+func (r *runner) stoppableHandshake(hs help.Handshake) error {
+	if hs.ServerInstanceID == "" || hs.LaunchMode == "" {
+		return legacyServerRestartRequired()
+	}
+	switch hs.LaunchMode {
+	case string(service.LaunchModeAuto), string(service.LaunchModeForeground):
+		return nil
+	case string(service.LaunchModeSupervised):
+		return supervisedControlRequired("stop")
+	default:
+		return r.refuseLaunchMode(hs.LaunchMode)
+	}
 }

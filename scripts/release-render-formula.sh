@@ -57,6 +57,14 @@ class Comms < Formula
     system "go", "build", *std_go_args(output: bin/"comms", ldflags:), "./cmd/comms"
   end
 
+  service do
+    run [opt_bin/"comms", "serve", "--supervised"]
+    run_at_load true
+    keep_alive true
+    log_path var/"log/comms.log"
+    error_log_path var/"log/comms.err.log"
+  end
+
   test do
     assert_match "comms $version (homebrew)", shell_output("#{bin}/comms version")
   end

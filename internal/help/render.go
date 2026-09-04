@@ -85,7 +85,7 @@ func CLIUsage(program string) string {
 		}
 		fmt.Fprintf(&output, "  %-92s %s\n", program+" "+operation.CLI, operation.Summary)
 	}
-	fmt.Fprintln(&output, "\nEvery response supports --json. Stateful commands require `comms serve`.")
+	fmt.Fprintln(&output, "\nEvery response supports --json. Ordinary commands start the local service if needed. status, health, hello, doctor, and stop do not. Use `comms serve` for a foreground process or `brew services start comms` for login startup.")
 	return output.String()
 }
 

@@ -13,7 +13,7 @@ func TestRegistryIsValidAndComplete(t *testing.T) {
 	}
 
 	wantIDs := []string{
-		"service.serve", "service.shutdown", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
+		"service.serve", "service.status", "service.stop", "service.restart", "service.shutdown", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
 		"agent.join", "agent.whoami", "agent.get", "agent.update", "agent.retire", "agent.list",
 		"topic.create", "topic.ensure", "topic.update", "topic.archive", "topic.list", "subscription.follow", "subscription.unfollow", "subscription.list",
 		"message.publish", "message.direct_send", "message.reply", "message.inbox", "message.topic", "message.thread", "message.peek", "message.read_through", "message.receipts", "message.search", "message.observe",
@@ -214,6 +214,26 @@ func TestOpenAPIModelsActualSuccessContracts(t *testing.T) {
 	}
 }
 
+func TestCLIUsageMentionsAutoStart(t *testing.T) {
+	usage := CLIUsage("comms")
+	if strings.Contains(usage, "Stateful commands require") {
+		t.Fatal("usage still requires an explicit comms serve")
+	}
+	for _, want := range []string{
+		"Ordinary commands start the local service if needed",
+		"status, health, hello, doctor, and stop do not",
+		"comms serve",
+		"brew services start comms",
+		"comms status",
+		"comms stop",
+		"comms restart",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("CLI usage omits %q", want)
+		}
+	}
+}
+
 func TestInstructionsStateCursorAndTrustBoundaries(t *testing.T) {
 	text := InstructionsText()
 	for _, want := range []string{
@@ -249,13 +269,20 @@ func TestOperationsReturnsDefensiveCopy(t *testing.T) {
 	}
 	parameterized.Parameters[0].Name = "changed"
 	parameterized.Parameters[0].Enum = []string{"changed"}
-	if operations[1].HTTP == nil {
-		t.Fatal("expected HTTP operation at index 1")
+	httpIndex := -1
+	for i := range operations {
+		if operations[i].HTTP != nil {
+			httpIndex = i
+			break
+		}
 	}
-	operations[1].HTTP.Path = "/changed"
+	if httpIndex < 0 {
+		t.Fatal("expected an HTTP operation")
+	}
+	operations[httpIndex].HTTP.Path = "/changed"
 
 	fresh := Operations()
-	if fresh[0].ID == "changed" || fresh[1].HTTP.Path == "/changed" {
+	if fresh[0].ID == "changed" || fresh[httpIndex].HTTP.Path == "/changed" {
 		t.Fatal("Operations exposed mutable registry state")
 	}
 	for _, operation := range fresh {

@@ -36,17 +36,9 @@ cd comms
 make install
 ```
 
-### 2. Start the Service
+### 2. Coordinate Between Agents
 
-Start the local background service:
-
-```sh
-comms serve
-```
-
-*(By default, this listens on a private Unix domain socket at `~/.local/state/comms/comms.sock` and manages the local SQLite database).*
-
-### 3. Coordinate Between Agents
+Ordinary commands start a per-user daemon if needed. There is no extra `comms serve` terminal.
 
 In your terminal or agent scripts:
 
@@ -76,6 +68,22 @@ COMMS_CONTEXT=/tmp/bob.json comms send @alice \
   --title "Running tests" \
   --body "I'll review td-123abc now."
 ```
+
+The CLI-managed daemon stays until logout, reboot, or `comms stop`. The next ordinary command starts it again. Inspect it with `comms status`.
+
+For an explicit foreground process (logs on the terminal):
+
+```sh
+comms serve
+```
+
+For login-managed startup with Homebrew:
+
+```sh
+brew services start comms
+```
+
+Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do not use `comms restart` against a supervised process.
 
 ---
 
@@ -123,7 +131,10 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms observe`: Monitor all live traffic as an operator.
 
 ### Service & Maintenance
-- `comms serve [--listen ADDR]`: Run the background service in the foreground.
+- `comms status`: Report whether the local service is running. Does not start it.
+- `comms stop`: Stop a CLI-managed or foreground service. Idempotent; refuses Homebrew-supervised processes.
+- `comms restart`: Stop a CLI-managed or foreground service if present, then start an auto daemon.
+- `comms serve [--socket PATH] [--db PATH] [--listen ADDRESS]`: Run the service in the foreground. `--daemon-child` and `--supervised` are launch-mode markers, not alternate database owners.
 - `comms instructions`: Print agent-focused operational rules and usage instructions.
 - `comms openapi`: Output OpenAPI 3.1 specification for the HTTP service.
 - `comms capabilities`: Output registered operations and capabilities as JSON.
