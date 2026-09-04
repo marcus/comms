@@ -177,8 +177,9 @@ main() {
     git push origin main
   fi
 
-  export RELEASE_VERSION=$release_version
-  ./scripts/release-check-state.sh pre-tag
+  # Do not export RELEASE_VERSION into `make`: release-test.sh sources this
+  # file and would then ignore BUMP= in its derive tests.
+  RELEASE_VERSION=$release_version ./scripts/release-check-state.sh pre-tag
 
   make check
   git diff --check
@@ -187,17 +188,12 @@ main() {
 
   # Close the race between the checks above and the only source-repository
   # mutation. A changed main or newly created tag must stop here.
-  ./scripts/release-check-state.sh pre-tag
+  RELEASE_VERSION=$release_version ./scripts/release-check-state.sh pre-tag
   expected_main=$(git rev-parse HEAD)
   push_release_tag "$release_version" "$expected_main"
 
-  exec ./scripts/release-tap.sh
+  RELEASE_VERSION=$release_version exec ./scripts/release-tap.sh
 }
-
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
-  main "$@"
-fi
-
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   main "$@"
