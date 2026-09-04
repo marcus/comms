@@ -33,10 +33,10 @@ printf '%s\n' 'Review td-123abc.' |
 COMMS_CONTEXT=/tmp/reviewer-comms.json comms inbox --unread --json
 ```
 
-Run `comms instructions` for agent-facing guarantees and examples, or
-`comms help` for the generated command catalog. Every response-producing
-command accepts `--json`. Message bodies accept `--body`, `--body-file`, or
-stdin selected with `-`.
+Run `comms instructions` for agent-facing guarantees and examples,
+`comms help` for the generated command catalog, or `comms openapi` for the
+generated HTTP contract. Every response-producing command accepts `--json`.
+Message bodies accept `--body`, `--body-file`, or stdin selected with `-`.
 
 ## Product shape
 

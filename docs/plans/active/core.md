@@ -1,7 +1,7 @@
 # Comms core implementation plan
 
 - **Task:** td-8f5777
-- **Status:** ready. The repository and build/release skeleton exist; core implementation has not started.
+- **Status:** implemented; the v1.0.0 publication candidate is under final review.
 
 ## Outcome
 
