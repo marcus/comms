@@ -73,14 +73,17 @@ case "$mode" in
       echo "Error: checked-out HEAD does not match $release_version" >&2
       exit 1
     fi
-    if [[ $tag_commit != "$remote_head" ]]; then
-      echo "Error: $release_version does not point at live origin/main" >&2
-      exit 1
-    fi
     remote_tag_commit=$(git ls-remote origin \
       "refs/tags/$release_version^{}" | awk '{print $1}')
     if [[ $remote_tag_commit != "$tag_commit" ]]; then
       echo "Error: remote $release_version does not resolve to the checked-out commit" >&2
+      exit 1
+    fi
+    if ! git cat-file -e "$remote_head^{commit}" 2>/dev/null; then
+      git fetch --no-tags --quiet origin refs/heads/main
+    fi
+    if ! git merge-base --is-ancestor "$tag_commit" "$remote_head"; then
+      echo "Error: $release_version is not an ancestor of live origin/main" >&2
       exit 1
     fi
     ;;

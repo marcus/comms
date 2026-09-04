@@ -39,6 +39,22 @@ for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
   }
 done
 
+while IFS= read -r archive; do
+  basename "$archive"
+done <"$temporary/archives" | LC_ALL=C sort >"$temporary/archive-basenames"
+awk '
+  NF != 2 { exit 2 }
+  { name=$2; sub(/^\*/, "", name); print name }
+' "$dist/checksums.txt" | LC_ALL=C sort >"$temporary/checksum-basenames" || {
+  echo "checksums.txt must contain one checksum and filename per line" >&2
+  exit 1
+}
+if ! cmp -s "$temporary/archive-basenames" "$temporary/checksum-basenames"; then
+  echo "checksums.txt entries do not exactly match the four release archives" >&2
+  diff -u "$temporary/archive-basenames" "$temporary/checksum-basenames" >&2 || true
+  exit 1
+fi
+
 host_os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$(uname -m)" in
   x86_64) host_arch=amd64 ;;

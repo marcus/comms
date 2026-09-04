@@ -2,9 +2,12 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+release_dist=${1:-}
 
 # shellcheck source=release-tap.sh
 source "$repo_root/scripts/release-tap.sh"
+# shellcheck source=release.sh
+source "$repo_root/scripts/release.sh"
 
 fail() {
   echo "release test failed: $*" >&2
@@ -30,6 +33,21 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir "$temporary/current" "$temporary/expected"
+
+if [[ -n $release_dist ]]; then
+  [[ -d $release_dist ]] || fail "release dist does not exist: $release_dist"
+  cp -R "$release_dist" "$temporary/broken-dist"
+  missing_archive=$(find "$temporary/broken-dist" -mindepth 1 -maxdepth 1 \
+    -type f -name '*.tar.gz' -print | LC_ALL=C sort | head -n 1)
+  missing_archive=$(basename "$missing_archive")
+  awk -v missing="$missing_archive" '$2 != missing { print }' \
+    "$temporary/broken-dist/checksums.txt" >"$temporary/broken-checksums.txt"
+  mv "$temporary/broken-checksums.txt" "$temporary/broken-dist/checksums.txt"
+  if "$repo_root/scripts/release-verify-assets.sh" \
+    "$temporary/broken-dist" >/dev/null 2>&1; then
+    fail "archive verifier accepted a checksum manifest missing $missing_archive"
+  fi
+fi
 
 # A command-line Make variable is exported to scripts as data. It must never
 # become shell source while the version guard rejects it.
@@ -125,9 +143,43 @@ cp "$notes_fixture" "$guard_repo/CHANGELOG.md"
   git -c user.name=release-test -c user.email=release-test@example.invalid \
     tag -a v1.2.3 -m "Release v1.2.3"
   git push --quiet origin refs/tags/v1.2.3
+  echo follow-on >>CHANGELOG.md
+  git add CHANGELOG.md
+  git -c user.name=release-test -c user.email=release-test@example.invalid \
+    commit --quiet -m follow-on
+  git push --quiet origin main
   git checkout --quiet --detach v1.2.3
   RELEASE_VERSION=v1.2.3 ./scripts/release-check-state.sh tagged >/dev/null
 )
+
+# A concurrent main advance before the tag push must publish neither ref and
+# must remove the just-created local tag so the operator can retry cleanly.
+race_repo="$temporary/source-race"
+race_remote="$temporary/source-race.git"
+git init --bare --quiet "$race_remote"
+git init --quiet --initial-branch=main "$race_repo"
+git -C "$race_repo" config user.name release-test
+git -C "$race_repo" config user.email release-test@example.invalid
+echo initial >"$race_repo/file"
+git -C "$race_repo" add file
+git -C "$race_repo" commit --quiet -m initial
+git -C "$race_repo" remote add origin "$race_remote"
+git -C "$race_repo" push --quiet -u origin main
+expected_main=$(git -C "$race_repo" rev-parse HEAD)
+git clone "$race_remote" "$temporary/source-racer" >/dev/null 2>&1
+git -C "$temporary/source-racer" config user.name release-test
+git -C "$temporary/source-racer" config user.email release-test@example.invalid
+echo raced >>"$temporary/source-racer/file"
+git -C "$temporary/source-racer" add file
+git -C "$temporary/source-racer" commit --quiet -m raced
+git -C "$temporary/source-racer" push --quiet origin main
+if (cd "$race_repo" && push_release_tag v9.9.9 "$expected_main") >/dev/null 2>&1; then
+  fail "atomic release push accepted a concurrently advanced main"
+fi
+git -C "$race_repo" rev-parse --verify --quiet refs/tags/v9.9.9 >/dev/null &&
+  fail "failed atomic release push left a local tag"
+git --git-dir="$race_remote" rev-parse --verify --quiet refs/tags/v9.9.9 >/dev/null &&
+  fail "failed atomic release push published a remote tag"
 
 # Prove the non-force race recovery preserves both the formula and unrelated
 # tap changes.

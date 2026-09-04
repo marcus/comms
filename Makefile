@@ -56,7 +56,7 @@ release-snapshot:
 
 release-verify: release-snapshot
 	./scripts/release-verify-assets.sh dist
-	./scripts/release-test.sh
+	./scripts/release-test.sh dist
 
 release-check-state:
 	./scripts/release-check-state.sh pre-tag
