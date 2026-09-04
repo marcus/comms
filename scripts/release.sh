@@ -7,11 +7,15 @@ cd "$repo_root"
 push_release_tag() {
   local release_version=$1 expected_main=$2
 
-  git tag -a "$release_version" -m "Release $release_version"
+  if [[ $(git rev-parse HEAD) != "$expected_main" ]]; then
+    echo "Error: local HEAD changed before tag creation" >&2
+    return 1
+  fi
+  git tag -a "$release_version" "$expected_main" -m "Release $release_version"
   if git push --atomic \
     --force-with-lease="refs/heads/main:$expected_main" \
     origin \
-    "refs/heads/main:refs/heads/main" \
+    "$expected_main:refs/heads/main" \
     "refs/tags/$release_version"; then
     return 0
   fi

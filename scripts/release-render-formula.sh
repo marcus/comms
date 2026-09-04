@@ -47,6 +47,7 @@ class Comms < Formula
   depends_on "go" => :build
 
   def install
+    ENV["CGO_ENABLED"] = "0"
     ldflags = [
       "-s",
       "-w",

@@ -66,6 +66,8 @@ done
 sha=0000000000000000000000000000000000000000000000000000000000000000
 "$repo_root/scripts/release-render-formula.sh" \
   v1.2.3 "$sha" "$temporary/expected/comms.rb" >/dev/null
+grep -Fq 'ENV["CGO_ENABLED"] = "0"' "$temporary/expected/comms.rb" ||
+  fail "formula does not force CGO_ENABLED=0"
 check_formula_transition \
   "$temporary/current/missing.rb" "$temporary/expected/comms.rb" v1.2.3 ||
   fail "rejected first formula publication"
@@ -180,6 +182,29 @@ git -C "$race_repo" rev-parse --verify --quiet refs/tags/v9.9.9 >/dev/null &&
   fail "failed atomic release push left a local tag"
 git --git-dir="$race_remote" rev-parse --verify --quiet refs/tags/v9.9.9 >/dev/null &&
   fail "failed atomic release push published a remote tag"
+
+local_race_repo="$temporary/source-local-race"
+local_race_remote="$temporary/source-local-race.git"
+git init --bare --quiet "$local_race_remote"
+git init --quiet --initial-branch=main "$local_race_repo"
+git -C "$local_race_repo" config user.name release-test
+git -C "$local_race_repo" config user.email release-test@example.invalid
+echo reviewed >"$local_race_repo/file"
+git -C "$local_race_repo" add file
+git -C "$local_race_repo" commit --quiet -m reviewed
+git -C "$local_race_repo" remote add origin "$local_race_remote"
+git -C "$local_race_repo" push --quiet -u origin main
+reviewed_main=$(git -C "$local_race_repo" rev-parse HEAD)
+echo unreviewed >>"$local_race_repo/file"
+git -C "$local_race_repo" add file
+git -C "$local_race_repo" commit --quiet -m unreviewed
+if (cd "$local_race_repo" && push_release_tag v9.9.8 "$reviewed_main") >/dev/null 2>&1; then
+  fail "release helper accepted a locally advanced HEAD"
+fi
+git -C "$local_race_repo" rev-parse --verify --quiet refs/tags/v9.9.8 >/dev/null &&
+  fail "local HEAD race left a local tag"
+git --git-dir="$local_race_remote" rev-parse --verify --quiet refs/tags/v9.9.8 >/dev/null &&
+  fail "local HEAD race published a remote tag"
 
 # Prove the non-force race recovery preserves both the formula and unrelated
 # tap changes.
