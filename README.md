@@ -4,23 +4,41 @@ Comms is a short-lived local signaling system for communication between independ
 
 ## Status
 
-The repository is a buildable skeleton. The core is intentionally not implemented yet. The implementation-ready specification and work sequence live in [`docs/plans/active/core.md`](docs/plans/active/core.md).
+The v1 core is implemented. Comms provides a complete CLI and versioned HTTP
+API over one shared application core, with generated OpenAPI, MCP tool
+descriptions, and agent instructions. The product contract lives in
+[`docs/plans/active/core.md`](docs/plans/active/core.md).
 
-The executable currently proves the build and release path:
+## Quick start
+
+Run the foreground service in one terminal:
 
 ```sh
-make build
-./bin/comms hello
-./bin/comms version
+comms serve
 ```
 
-Expected hello-world output:
+Create two isolated session contexts, then follow and use a topic:
 
-```text
-hello from comms
+```sh
+comms join writer --harness codex --context /tmp/writer-comms.json
+comms join reviewer --harness claude-code --context /tmp/reviewer-comms.json
+
+COMMS_CONTEXT=/tmp/writer-comms.json comms topic create project-alpha
+COMMS_CONTEXT=/tmp/writer-comms.json comms topic follow project-alpha
+COMMS_CONTEXT=/tmp/reviewer-comms.json comms topic follow project-alpha
+
+printf '%s\n' 'Review td-123abc.' |
+  COMMS_CONTEXT=/tmp/writer-comms.json \
+  comms publish project-alpha --title 'Review ready' -
+COMMS_CONTEXT=/tmp/reviewer-comms.json comms inbox --unread --json
 ```
 
-## Intended product
+Run `comms instructions` for agent-facing guarantees and examples, or
+`comms help` for the generated command catalog. Every response-producing
+command accepts `--json`. Message bodies accept `--body`, `--body-file`, or
+stdin selected with `-`.
+
+## Product shape
 
 - Go single binary.
 - SQLite authoritative store owned by one local service, with a serialized writer and bounded WAL read pool.
@@ -30,7 +48,8 @@ hello from comms
 - Sender-visible read receipts derived from explicit per-session topic cursors.
 - Default project topics keyed by external references such as `sidecar:<project-key>`.
 - Seven-day default message lifetime with explicit overrides.
-- CLI first as a client of that service; native HTTP, MCP, Sidecar, and SSH RPC surfaces use the same operations.
+- CLI as a client of the local versioned HTTP service, with optional loopback
+  TCP exposure and generated OpenAPI/MCP contracts for additional clients.
 - Complete versioned JSON output plus message bodies from flags, files, or stdin.
 - Local-agent and operator visibility into all traffic, including direct traffic, without changing session read state.
 - Diagnostic JSONL export for inspection, not authoritative history or backup.
@@ -48,6 +67,19 @@ make release-snapshot
 ```
 
 `make check` builds, runs race-enabled tests, vets, and runs the repository-pinned golangci-lint version. Release archives target macOS and Linux on amd64 and arm64 with `CGO_ENABLED=0`.
+
+## Installation and releases
+
+After the first public release, install Comms from Marcus's Homebrew tap:
+
+```sh
+brew install marcus/tap/comms
+comms version
+```
+
+Maintainers publish a reviewed, clean `main` candidate and the matching
+Homebrew formula with one guarded command. The workflow and recovery procedure
+are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## License
 

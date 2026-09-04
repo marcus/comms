@@ -16,7 +16,7 @@ func TestRun(t *testing.T) {
 	}{
 		{name: "default help", wantCode: 0, wantStdout: "Usage:\n"},
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "short-lived local topics"},
-		{name: "hello", args: []string{"hello"}, wantCode: 0, wantStdout: "hello from comms\n"},
+		{name: "hello requires service", args: []string{"hello"}, wantCode: 5, wantStderr: "Start the service with 'comms serve'."},
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "comms dev (unknown)\n"},
 		{name: "unknown", args: []string{"nope"}, wantCode: 2, wantStderr: "unknown command \"nope\""},
 	}
