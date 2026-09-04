@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,4 +33,5 @@ jobs:
           distribution: goreleaser
           version: v2.16.0
           install-only: true
-      - run: make release-snapshot
+      - run: make release-verify
+      - run: git diff --check

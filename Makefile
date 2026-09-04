@@ -8,7 +8,8 @@ LDFLAGS := -X $(PKG)/pkg/buildinfo.Version=$(VERSION) \
 BIN     := bin
 PREFIX  ?= $(HOME)/.local
 
-.PHONY: all build install uninstall test cover lint fmt tidy vet check clean release-snapshot
+.PHONY: all build install uninstall test cover lint fmt fmt-check tidy vet check clean \
+	release-snapshot release-verify release release-dry-run release-tap release-check-state
 
 all: check
 
@@ -37,17 +38,37 @@ fmt:
 	$(GO) fmt ./...
 	gofmt -s -w .
 
+fmt-check:
+	@unformatted="$$(gofmt -s -l .)"; \
+		test -z "$$unformatted" || { echo "files need gofmt -s:"; echo "$$unformatted"; exit 1; }
+
 tidy:
 	$(GO) mod tidy
 
 vet:
 	$(GO) vet ./...
 
-check: build test vet lint
+check: fmt-check build test vet lint
 
 release-snapshot:
 	$(GORELEASER) check
 	$(GORELEASER) release --snapshot --clean
+
+release-verify: release-snapshot
+	./scripts/release-verify-assets.sh dist
+	./scripts/release-test.sh
+
+release-check-state:
+	./scripts/release-check-state.sh pre-tag
+
+release:
+	./scripts/release.sh
+
+release-dry-run:
+	./scripts/release.sh --dry-run
+
+release-tap:
+	./scripts/release-tap.sh
 
 clean:
 	rm -rf $(BIN) dist coverage.out
