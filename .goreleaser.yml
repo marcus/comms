@@ -1,0 +1,46 @@
+version: 2
+
+project_name: comms
+
+builds:
+  - id: comms
+    main: ./cmd/comms
+    binary: comms
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/marcus/comms/pkg/buildinfo.Version=v{{ .Version }}
+        -X github.com/marcus/comms/pkg/buildinfo.Commit={{ .Commit }}
+
+archives:
+  - id: release
+    ids: [comms]
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    wrap_in_directory: true
+    files:
+      - README.md
+      - CHANGELOG.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+
