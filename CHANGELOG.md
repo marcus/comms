@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
+
+- Start the local service from ordinary commands such as `join`, `publish`,
+  and `inbox`. A second terminal running `comms serve` is no longer required.
+- Replace an older CLI-managed `auto` daemon with the current stable binary
+  before sending the operation, once, reusing the same request identity.
+- Add `status`, idempotent `stop`, and explicit `restart`. A Homebrew-supervised
+  service is left to `brew services`; the CLI will not race it.
+- Report process incarnation on `GET /v1/hello`, and add Unix-only
+  `POST /v1/admin/shutdown` fenced by `server_instance_id`.
+- Ship a Homebrew service block that runs `comms serve --supervised`.
 
 ## [1.0.0] - 2026-09-04
 

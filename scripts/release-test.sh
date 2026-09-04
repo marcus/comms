@@ -246,4 +246,88 @@ cmp -s "$temporary/remote-comms.rb" "$temporary/expected/comms.rb" ||
 [[ $(git --git-dir="$temporary/tap.git" rev-list --count main) == 3 ]] ||
   fail "race-safe push did not preserve both commits"
 
+derive_repo="$temporary/derive"
+git init --quiet --initial-branch=main "$derive_repo"
+git -C "$derive_repo" config user.name release-test
+git -C "$derive_repo" config user.email release-test@example.invalid
+cat >"$derive_repo/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+- Notes for the next release.
+
+## [1.0.0] - 2026-09-04
+
+- First release.
+EOF
+git -C "$derive_repo" add CHANGELOG.md
+git -C "$derive_repo" commit --quiet -m initial
+git -C "$derive_repo" tag v1.0.0
+
+derived=$(cd "$derive_repo" && BUMP=minor derive_release_version) ||
+  fail "BUMP=minor did not derive a version from Unreleased"
+[[ $derived == $'v1.1.0\tstamp' ]] || fail "BUMP=minor derived '$derived', want v1.1.0 stamp"
+derived=$(cd "$derive_repo" && BUMP=major derive_release_version) ||
+  fail "BUMP=major did not derive a version from Unreleased"
+[[ $derived == $'v2.0.0\tstamp' ]] || fail "BUMP=major derived '$derived', want v2.0.0 stamp"
+derived=$(cd "$derive_repo" && BUMP=patch derive_release_version) ||
+  fail "BUMP=patch did not derive a version from Unreleased"
+[[ $derived == $'v1.0.1\tstamp' ]] || fail "BUMP=patch derived '$derived', want v1.0.1 stamp"
+derived=$(cd "$derive_repo" && RELEASE_VERSION=v1.2.0 derive_release_version) ||
+  fail "RELEASE_VERSION did not stamp Unreleased"
+[[ $derived == $'v1.2.0\tstamp' ]] || fail "explicit Unreleased stamp derived '$derived'"
+
+if (cd "$derive_repo" && derive_release_version) >/dev/null 2>&1; then
+  fail "Unreleased heading derived a version without BUMP or RELEASE_VERSION"
+fi
+
+cat >"$derive_repo/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+## [1.0.0] - 2026-09-04
+
+- First release.
+EOF
+if (cd "$derive_repo" && BUMP=minor derive_release_version) >/dev/null 2>&1; then
+  fail "empty Unreleased section was accepted"
+fi
+
+cat >"$derive_repo/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [1.3.0] - 2026-09-04
+
+- Already stamped.
+
+## [1.0.0] - 2026-09-01
+
+- First release.
+EOF
+derived=$(cd "$derive_repo" && derive_release_version) ||
+  fail "already-stamped heading did not derive a version"
+[[ $derived == $'v1.3.0\tready' ]] || fail "stamped heading derived '$derived', want v1.3.0 ready"
+if (cd "$derive_repo" && RELEASE_VERSION=v1.4.0 derive_release_version) >/dev/null 2>&1; then
+  fail "RELEASE_VERSION that contradicts a stamped heading was accepted"
+fi
+
+cat >"$derive_repo/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+- Notes for the next release.
+
+## [1.0.0] - 2026-09-04
+
+- First release.
+EOF
+(cd "$derive_repo" && stamp_changelog v1.1.0)
+grep -Fq '## [1.1.0] - ' "$derive_repo/CHANGELOG.md" ||
+  fail "stamp_changelog did not rewrite Unreleased"
+grep -Fq '## [Unreleased]' "$derive_repo/CHANGELOG.md" &&
+  fail "stamp_changelog left an Unreleased heading"
+
 echo "release guards and publication helpers passed"
