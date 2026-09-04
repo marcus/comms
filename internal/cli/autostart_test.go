@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -90,7 +91,8 @@ func execBin(bin string, env []string, args ...string) (stdout, stderr string, c
 	if runErr == nil {
 		return stdout, stderr, 0, nil
 	}
-	if ee, ok := runErr.(*exec.ExitError); ok {
+	var ee *exec.ExitError
+	if errors.As(runErr, &ee) {
 		return stdout, stderr, ee.ExitCode(), nil
 	}
 	return stdout, stderr, -1, runErr
