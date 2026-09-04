@@ -1,13 +1,13 @@
 # Comms core implementation plan
 
 - **Task:** td-8f5777
-- **Status:** implemented; the v1.0.0 publication candidate is under final review.
+- **Status:** v1 CLI/HTTP core implemented; the v1.0.0 publication candidate is under final review. Phase 9 consumer adapters are explicit follow-on work.
 
 ## Outcome
 
 An agent can install one Go binary, register an addressable session with a friendly label, follow a topic, publish a titled freeform message, reply in a thread, and inspect unread messages through stable human and JSON CLI output. Independent Claude Code, Codex, Gemini, and other sessions on the same machine share one SQLite store. The operator and other local agents can inspect all traffic without advancing any session's read cursor. Messages expire after seven days by default.
 
-The application core is transport-neutral and runs inside one local service that exclusively owns SQLite. The CLI ships first as a client of that service; HTTP, MCP, Sidecar, and SSH RPC expose the same operations without reimplementing messaging rules.
+The application core is transport-neutral and runs inside one local service that exclusively owns SQLite. The v1 CLI is a client of its versioned Unix-socket HTTP API, with optional loopback TCP exposure. Generated MCP descriptions and the shared HTTP contract keep future MCP, Sidecar, and SSH RPC adapters from reimplementing messaging rules; those consumer adapters are phase 9 follow-on work and are not part of the v1.0.0 publication.
 
 ## Product boundary
 
@@ -29,7 +29,7 @@ Version 1 is one user and one machine. Cross-project communication is ordinary b
 8. **Per-message expiration, thread-safe purge:** each message defaults to `created_at + 7d`; explicit duration/time and never-expire override it. Replies do not extend ancestors. Normal queries hide an expired message, but purge retains expired ancestors while any descendant remains live so an active thread keeps its context. The whole thread becomes purgeable once every message in it has expired.
 9. **Project integration by external identity:** Sidecar ensures its default project topic with unique external reference `(namespace="sidecar", key=<Sidecar project key>)`, rendered `sidecar:<key>`. Topic display-name collisions receive a suffix; an inconsistent external-key collision fails rather than splitting the project conversation.
 10. **Generated agent help:** one transport-neutral operation/capability registry is the authored source for CLI help, versioned JSON descriptions, HTTP OpenAPI, MCP tool descriptions, and agent onboarding information. OpenAPI is generated from that registry rather than serving as the source because process-local commands and CLI context, stdin, and file semantics are not HTTP operations. `comms instructions` describes capabilities, guarantees, and optional usage patterns without prescribing polling, startup, or handoff behavior. Static `AGENTS.md` text only tells an agent how to discover those instructions.
-11. **CLI-first delivery through the service:** only process-local commands such as `hello` and `version` run without the service. Stateful CLI commands use a small versioned HTTP API over a local Unix socket. HTTP/TCP and MCP follow after that contract is proven. Sidecar is an API client. SSH later invokes structured RPC against the same application operations.
+11. **CLI-first delivery through the service:** only process-local commands such as `help`, `openapi`, and `version` run without the service. Stateful CLI commands, including `hello`, use a small versioned HTTP API over a local Unix socket. Optional loopback TCP ships with v1. MCP, Sidecar, and SSH RPC adapters follow after that contract is proven; Sidecar will be an API client and SSH will invoke structured RPC against the same application operations.
 12. **Queues are deferred:** competing consumers require claims, leases, retries, and completion state and therefore constitute work dispatch, not basic pub/sub.
 13. **A narrow store seam, not a backend framework:** application use cases depend on purpose-specific store interfaces implemented by SQLite. This supports unit tests and keeps SQL out of domain logic without committing v1 to runtime backend selection or a filesystem implementation.
 14. **Read receipts are cursor-derived:** a sender can query which subscribed sessions have explicitly acknowledged through a message. Receipt state comes from subscription cursors, with one checkpoint recorded per cursor advance to preserve the first acknowledgment time; Comms does not create one delivery row per recipient per message. A receipt means “marked read through this sequence,” not proof that a model understood the content.
@@ -178,6 +178,8 @@ The initial command family is:
 comms [--json] [--as AGENT] COMMAND
 
 comms serve
+comms help
+comms openapi
 comms join [HANDLE] [--display-name TEXT] [--purpose TEXT] [--harness NAME]
            [--external-namespace NAME --external-key KEY] [--context PATH]
 comms whoami
@@ -289,12 +291,12 @@ Each phase must leave `make check` green and include black-box CLI assertions wh
 - Stream export through the service and let the CLI write an optional client-local output file.
 - Document that export is for inspection and one-off tooling, not a guaranteed restore, replication, or historical-archive format.
 
-### 9. Additional native surfaces after CLI proof
+### 9. Additional native surfaces after CLI proof (TCP complete; remaining adapters follow-on)
 
 - TCP HTTP/OpenAPI exposure of the same handlers, loopback-only by default.
-- MCP tools and prompt/resource over the same operations and generated help.
-- Sidecar plugin/client using the HTTP API, with `sidecar:<project-key>` topic ensure.
-- SSH stdio RPC and remote aliases/store handshake, then optional Tailscale Serve documentation.
+- After v1.0.0, add MCP tools and prompt/resource over the same operations and generated help.
+- After v1.0.0, add a Sidecar plugin/client using the HTTP API, with `sidecar:<project-key>` topic ensure.
+- After v1.0.0, add SSH stdio RPC and remote aliases/store handshake, then optional Tailscale Serve documentation.
 
 ## Acceptance
 
