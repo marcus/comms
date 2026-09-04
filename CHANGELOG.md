@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0] - 2026-09-04
 
 - Start the local service from ordinary commands such as `join`, `publish`,
   and `inbox`. A second terminal running `comms serve` is no longer required.
