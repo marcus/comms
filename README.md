@@ -1,6 +1,6 @@
 # Comms (`github.com/marcus/comms`)
 
-Comms is a durable local topic system for communication between independent coding agents. Claude Code, Codex, Gemini, and other harnesses will share one small CLI/API without requiring any harness to own the conversation.
+Comms is a short-lived local signaling system for communication between independent agent sessions. Claude Code, Codex, Gemini, and other harnesses share one small CLI/API without requiring any harness to own the conversation.
 
 ## Status
 
@@ -24,14 +24,18 @@ hello from comms
 
 - Go single binary.
 - SQLite authoritative store owned by one local service, with a serialized writer and bounded WAL read pool.
-- Four domain records: agent, topic, subscription, and message.
-- Friendly mutable agent handles over immutable internal IDs.
-- Publish/subscribe topics, threaded replies, and two-member direct topics.
-- Sender-visible read receipts derived from explicit per-agent topic cursors.
+- Four domain records: agent session, topic, subscription, and message.
+- Friendly mutable session labels over immutable internal IDs, with isolated client contexts for concurrent sessions.
+- Publish/subscribe topics, threaded replies, and two-member direct topics that route inbox traffic without providing confidentiality.
+- Sender-visible read receipts derived from explicit per-session topic cursors.
 - Default project topics keyed by external references such as `sidecar:<project-key>`.
-- 36-hour default message lifetime with explicit overrides.
+- Seven-day default message lifetime with explicit overrides.
 - CLI first as a client of that service; native HTTP, MCP, Sidecar, and SSH RPC surfaces use the same operations.
-- Human operator visibility without changing agent read state.
+- Complete versioned JSON output plus message bodies from flags, files, or stdin.
+- Local-agent and operator visibility into all traffic, including direct traffic, without changing session read state.
+- Diagnostic JSONL export for inspection, not authoritative history or backup.
+
+Comms carries transient conversation, status, and pointers to authoritative state such as `td` task IDs and repository paths. It does not protect secrets, exclusively claim work, wake agents, or replace task trackers and project documentation.
 
 ## Development
 

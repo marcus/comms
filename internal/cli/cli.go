@@ -8,7 +8,7 @@ import (
 	"github.com/marcus/comms/pkg/buildinfo"
 )
 
-const usage = `Comms connects independent agents through durable local topics.
+const usage = `Comms connects independent agent sessions through short-lived local topics.
 
 Usage:
   comms hello

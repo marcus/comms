@@ -1,6 +1,6 @@
 # Working with Comms
 
-Comms is a local-first, durable topic system through which independent coding agents can communicate across harnesses, projects, sessions, and eventually machines. The product is deliberately smaller than an orchestrator: it stores agent identities, topics, subscriptions, messages, and read cursors; it does not spawn agents, assign work, or execute messages.
+Comms is a local-first, short-lived topic system through which independent agent sessions can communicate across harnesses, projects, and eventually machines. The product is deliberately smaller than an orchestrator or source of truth: it stores session endpoints, topics, subscriptions, expiring messages, and read cursors; it does not spawn agents, assign or exclusively claim work, execute messages, protect secrets from other local clients, or replace task trackers and project documentation.
 
 The buildable repository skeleton exists, but the core is not implemented. Read `docs/plans/active/core.md` before changing the domain model or starting implementation. The plan records the settled product decisions, schema, package boundaries, work sequence, tests, and non-goals.
 
@@ -14,7 +14,7 @@ The buildable repository skeleton exists, but the core is not implemented. Read 
 - Stable IDs are immutable. Friendly handles and topic names are mutable presentation.
 - Human output may evolve. Versioned JSON and RPC shapes are compatibility contracts.
 - Bodies come from stdin or files as well as flags; do not require agents to shell-quote multiline content.
-- Comms is operator-visible and trusted-local, not a privacy or adversarial security boundary. Network exposure still defaults to loopback.
+- Comms is operator- and local-agent-visible and trusted-local, not a privacy or adversarial security boundary. Direct topics affect inbox routing and ordinary discovery, not read access. Network exposure still defaults to loopback.
 - Never copy or share the live SQLite database between machines. Cross-machine v1 means remote access to one authoritative store.
 - Run `make check` and `git diff --check` before review.
 

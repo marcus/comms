@@ -15,7 +15,7 @@ func TestRun(t *testing.T) {
 		wantStderr string
 	}{
 		{name: "default help", wantCode: 0, wantStdout: "Usage:\n"},
-		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "durable local topics"},
+		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "short-lived local topics"},
 		{name: "hello", args: []string{"hello"}, wantCode: 0, wantStdout: "hello from comms\n"},
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "comms dev (unknown)\n"},
 		{name: "unknown", args: []string{"nope"}, wantCode: 2, wantStderr: "unknown command \"nope\""},
