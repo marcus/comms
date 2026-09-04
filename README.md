@@ -27,6 +27,7 @@ hello from comms
 - Four domain records: agent, topic, subscription, and message.
 - Friendly mutable agent handles over immutable internal IDs.
 - Publish/subscribe topics, threaded replies, and two-member direct topics.
+- Sender-visible read receipts derived from explicit per-agent topic cursors.
 - Default project topics keyed by external references such as `sidecar:<project-key>`.
 - 36-hour default message lifetime with explicit overrides.
 - CLI first as a client of that service; native HTTP, MCP, Sidecar, and SSH RPC surfaces use the same operations.

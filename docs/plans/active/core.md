@@ -30,6 +30,7 @@ Version 1 is one user and one machine. Cross-project communication is ordinary b
 11. **CLI-first delivery through the service:** only process-local commands such as `hello` and `version` run without the service. Stateful CLI commands use a small versioned HTTP API over a local Unix socket. HTTP/TCP and MCP follow after that contract is proven. Sidecar is an API client. SSH later invokes structured RPC against the same application operations.
 12. **Queues are deferred:** competing consumers require claims, leases, retries, and completion state and therefore constitute work dispatch, not basic pub/sub.
 13. **A narrow store seam, not a backend framework:** application use cases depend on purpose-specific store interfaces implemented by SQLite. This supports unit tests and keeps SQL out of domain logic without committing v1 to runtime backend selection or a filesystem implementation.
+14. **Read receipts are cursor-derived:** a sender can query which subscribed agents have explicitly acknowledged through a message. Receipt state comes from subscription cursors, with one checkpoint recorded per cursor advance to preserve the first acknowledgment time; Comms does not create one delivery row per recipient per message. A receipt means “marked read through this sequence,” not proof that a model understood the content.
 
 ## Domain model
 
@@ -68,11 +69,14 @@ A subscription joins one agent to one topic:
 - `agent_id`, `topic_id` composite identity;
 - `followed_at`, optional `unfollowed_at`;
 - `read_through_sequence`, initially zero or a derived sequence;
+- optional `read_through_at`, updated whenever the cursor advances;
 - `updated_at`.
 
 A new public-topic subscriber starts immediately before the earliest currently unexpired message, so the first inbox check includes available recent context but never already-expired history. If the topic has no live messages, it starts at the current tail. Unfollow preserves the cursor; refollow resumes it. Direct-topic subscriptions cannot be individually unfollowed; the direct topic is archived when either agent is retired or an explicit future close operation is added.
 
-`peek` does not move the cursor. `read <message>` advances the subscription cursor through that message's topic sequence and therefore marks every earlier visible message in the topic read. Selective per-message unread state is deliberately absent.
+`peek` and inbox listing do not move the cursor. `read <message>` advances the subscription cursor through that message's topic sequence, records `read_through_at`, and therefore marks every earlier visible message in the topic read. Selective per-message unread state is deliberately absent.
+
+A receipt query compares the message sequence with each subscription cursor. For a direct topic it reports the other member's `unread` or `read` state and, when read, the first cursor-advance time that covered the message. For a public topic it reports active subscribers other than the author plus any former subscriber who acknowledged the message before unfollowing. The operation is observational and never changes a cursor.
 
 ### Message
 
@@ -108,8 +112,10 @@ topics(id primary key, name, kind, description, next_sequence,
 topic_external_refs(namespace, external_key, topic_id,
                     primary key(namespace, external_key))
 subscriptions(agent_id, topic_id, followed_at, unfollowed_at,
-              read_through_sequence, updated_at,
+              read_through_sequence, read_through_at, updated_at,
               primary key(agent_id, topic_id))
+subscription_read_advances(agent_id, topic_id, through_sequence, read_at,
+                           primary key(agent_id, topic_id, through_sequence))
 messages(id primary key, topic_id, sequence, author_id, author_context_json,
          title, body, in_reply_to, thread_root_id, created_at, expires_at,
          metadata_json, unique(topic_id, sequence))
@@ -141,7 +147,7 @@ Transport-neutral request and response types cover:
 - create/ensure/archive/list topic;
 - follow/unfollow/list subscriptions;
 - publish/direct-send/reply;
-- inbox/topic/thread/peek/read/search;
+- inbox/topic/thread/peek/read/receipts/search;
 - retention status and purge;
 - observe without cursor mutation;
 - versioned JSONL export/import;
@@ -176,6 +182,7 @@ comms reply MESSAGE_ID [--title TEXT] [--body TEXT|-]
 comms inbox [--unread] [--threads] [--since CURSOR] [--json]
 comms peek MESSAGE_ID [--json]
 comms read MESSAGE_ID [--json]
+comms receipts MESSAGE_ID [--json]
 comms thread MESSAGE_ID [--json]
 comms search QUERY [--from AGENT] [--topic TOPIC] [--json]
 comms observe [--since TIME] [--json]
@@ -245,9 +252,10 @@ Each phase must leave `make check` green and include black-box CLI assertions wh
 
 ### 5. Messages and threads
 
-- Transactional sequence allocation, publish, direct send, reply, inbox, peek, read cursor, topic/thread views, and basic SQLite FTS5 search.
+- Transactional sequence allocation, publish, direct send, reply, inbox, peek, read cursor, sender-visible receipts, topic/thread views, and basic SQLite FTS5 search.
 - Root-title requirement, reply inheritance, same-topic parent check, body/metadata bounds.
 - Concurrent publish test proving gap-free unique sequences and no partial direct-topic creation.
+- Receipt tests proving `peek` and inbox listing do not acknowledge, cursor advance atomically records one checkpoint and acknowledges the requested message and earlier sequences, the first covering checkpoint supplies the receipt time, and receipt queries never mutate state.
 
 ### 6. Retention and observation
 
@@ -291,6 +299,7 @@ Each phase must leave `make check` green and include black-box CLI assertions wh
 12. `make check`, `git diff --check`, and CI pass.
 13. A second service cannot own the same store, all mutations pass through one writer, and concurrent reads remain available in WAL mode.
 14. Application tests can replace the narrow store interfaces, while production exposes no backend selector and ships only SQLite.
+15. A sender can distinguish unread from explicitly acknowledged messages for direct and public topics without creating per-message delivery records.
 
 ## Non-goals
 
