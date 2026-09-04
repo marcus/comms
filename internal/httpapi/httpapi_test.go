@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -276,4 +280,115 @@ func TestUnixHandlerHandshakeAndConditionalShutdown(t *testing.T) {
 	if calls := life.shutdownCalls(); len(calls) != 1 || calls[0] != life.status.ServerInstanceID {
 		t.Fatalf("shutdown calls=%v", calls)
 	}
+}
+
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "comms-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func TestClientDoPreservesDialCause(t *testing.T) {
+	client := NewUnixClient(filepath.Join(shortTempDir(t), "missing.sock"), "")
+	err := client.Do(context.Background(), http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})
+	if err == nil {
+		t.Fatal("expected dial error")
+	}
+	if !errors.Is(err, app.ErrUnavailable) {
+		t.Fatalf("unavailable wrap missing: %v", err)
+	}
+	var op *net.OpError
+	if !errors.As(err, &op) {
+		t.Fatalf("net.OpError not inspectable: %v", err)
+	}
+	if !IsAutoStartableDial(err) {
+		t.Fatalf("ENOENT should be auto-startable: %v", err)
+	}
+}
+
+func TestIsAutoStartableDial(t *testing.T) {
+	t.Run("ENOENT", func(t *testing.T) {
+		client := NewUnixClient(filepath.Join(shortTempDir(t), "missing.sock"), "")
+		err := client.Do(context.Background(), http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})
+		if !IsAutoStartableDial(err) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("ECONNREFUSED", func(t *testing.T) {
+		path := filepath.Join(shortTempDir(t), "stale.sock")
+		addr, err := net.ResolveUnixAddr("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.ListenUnix("unix", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
+		client := NewUnixClient(path, "")
+		err = client.Do(context.Background(), http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})
+		if !IsAutoStartableDial(err) {
+			t.Fatalf("stale socket err=%v", err)
+		}
+	})
+	t.Run("permission", func(t *testing.T) {
+		dir := shortTempDir(t)
+		blocked := filepath.Join(dir, "blocked")
+		if err := os.Mkdir(blocked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		socket := filepath.Join(blocked, "comms.sock")
+		if err := os.Chmod(blocked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+		client := NewUnixClient(socket, "")
+		err := client.Do(context.Background(), http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})
+		if err == nil {
+			t.Fatal("expected permission error")
+		}
+		if IsAutoStartableDial(err) {
+			t.Fatalf("permission should not auto-start: %v", err)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		client := NewUnixClient(filepath.Join(shortTempDir(t), "missing.sock"), "")
+		err := client.Do(ctx, http.MethodGet, "/v1/hello", nil, nil, &map[string]any{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v", err)
+		}
+		if IsAutoStartableDial(err) {
+			t.Fatalf("canceled should not auto-start: %v", err)
+		}
+	})
+	t.Run("constructed errno", func(t *testing.T) {
+		tests := []struct {
+			name string
+			err  error
+			want bool
+		}{
+			{name: "ENOENT", err: wrapClientError(&net.OpError{Op: "dial", Net: "unix", Err: syscall.ENOENT}), want: true},
+			{name: "ECONNREFUSED", err: wrapClientError(&net.OpError{Op: "dial", Net: "unix", Err: syscall.ECONNREFUSED}), want: true},
+			{name: "EACCES", err: wrapClientError(&net.OpError{Op: "dial", Net: "unix", Err: syscall.EACCES}), want: false},
+			{name: "timeout", err: wrapClientError(&net.OpError{Op: "dial", Net: "unix", Err: os.ErrDeadlineExceeded}), want: false},
+			{name: "plain unavailable", err: app.ErrUnavailable, want: false},
+			{name: "http message", err: errors.New("http 500"), want: false},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := IsAutoStartableDial(tt.err); got != tt.want {
+					t.Fatalf("IsAutoStartableDial(%v)=%v want %v", tt.err, got, tt.want)
+				}
+			})
+		}
+	})
 }

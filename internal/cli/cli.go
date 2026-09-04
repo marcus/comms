@@ -28,23 +28,30 @@ import (
 const cliSchema = "comms.cli.v1"
 
 type Env struct {
-	Args    []string
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Stderr  io.Writer
-	Context context.Context
-	Getenv  func(string) string
+	Args        []string
+	Stdin       io.Reader
+	Stdout      io.Writer
+	Stderr      io.Writer
+	Context     context.Context
+	Getenv      func(string) string
+	Executable  func() (string, error)
+	StartDaemon func(ctx context.Context, spec DaemonSpec) (DaemonHandle, error)
 }
 type globals struct {
-	json    bool
-	help    bool
-	as      string
-	socket  string
-	timeout time.Duration
+	json        bool
+	help        bool
+	as          string
+	socket      string
+	timeout     time.Duration
+	noAutoStart bool
 }
 type runner struct {
-	env Env
-	g   globals
+	env       Env
+	g         globals
+	policy    commandPolicy
+	socket    string
+	cmdCtx    context.Context
+	cmdCancel context.CancelFunc
 }
 
 func Run(env Env) int {
@@ -68,6 +75,11 @@ func Run(env Env) int {
 		return fail(env, false, err)
 	}
 	r := &runner{env: env, g: g}
+	defer func() {
+		if r.cmdCancel != nil {
+			r.cmdCancel()
+		}
+	}()
 	if g.help {
 		_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
 		return 0
@@ -83,6 +95,7 @@ func Run(env Env) int {
 }
 
 func (r *runner) run(args []string) error {
+	r.policy = commandPolicyOf(args[0])
 	switch args[0] {
 	case "help", "-h", "--help":
 		_, _ = io.WriteString(r.env.Stdout, help.CLIUsage("comms"))
@@ -217,10 +230,12 @@ func (r *runner) serve(args []string) error {
 			return err
 		}
 	}
-	if *listen == "" {
-		_, _ = fmt.Fprintf(r.env.Stdout, "comms: serving on %s\n", path)
-	} else {
-		_, _ = fmt.Fprintf(r.env.Stdout, "comms: serving on http://%s\n", *listen)
+	if mode != service.LaunchModeAuto {
+		if *listen == "" {
+			_, _ = fmt.Fprintf(r.env.Stdout, "comms: serving on %s\n", path)
+		} else {
+			_, _ = fmt.Fprintf(r.env.Stdout, "comms: serving on http://%s\n", *listen)
+		}
 	}
 	return service.Run(r.env.Context, service.Config{DatabasePath: *database, SocketPath: path, Listen: *listen, LaunchMode: mode})
 }
@@ -696,8 +711,7 @@ func (r *runner) export(args []string) error {
 	if e != nil {
 		return e
 	}
-	ctx, cancel := r.callContext()
-	defer cancel()
+	ctx := r.commandContext()
 	if *output == "" {
 		return client.Export(ctx, r.env.Stdout)
 	}
@@ -780,29 +794,21 @@ func (r *runner) clientWithIdentity(required bool) (selectedIdentity, *httpapi.C
 	default:
 		selected, _ = resolveIdentity("", r.env.Getenv)
 	}
-	socket := r.g.socket
-	if socket == "" {
-		socket = r.env.Getenv("COMMS_SOCKET")
+	socket, e := r.resolveSocket()
+	if e != nil {
+		return selected, nil, e
 	}
-	if socket == "" {
-		socket, e = service.ResolveSocketPath(false)
-		if e != nil {
+	client := httpapi.NewUnixClient(socket, selected.Agent)
+	if r.policy == policyAutoStart {
+		if e = r.ensureReady(client); e != nil {
 			return selected, nil, e
 		}
 	}
-	return selected, httpapi.NewUnixClient(socket, selected.Agent), nil
-}
-func (r *runner) callContext() (context.Context, context.CancelFunc) {
-	if r.g.timeout <= 0 {
-		return r.env.Context, func() {}
-	}
-	return context.WithTimeout(r.env.Context, r.g.timeout)
+	return selected, client, nil
 }
 
 func (r *runner) do(client *httpapi.Client, method, path string, query url.Values, input, output any) error {
-	ctx, cancel := r.callContext()
-	defer cancel()
-	return client.Do(ctx, method, path, query, input, output)
+	return client.Do(r.commandContext(), method, path, query, input, output)
 }
 
 func (r *runner) output(value any) error {
@@ -933,6 +939,8 @@ func parseGlobals(args []string) (globals, []string, error) {
 				return g, nil, usage("invalid --timeout")
 			}
 			g.timeout = d
+		case arg == "--no-auto-start":
+			g.noAutoStart = true
 		default:
 			rest = append(rest, arg)
 		}
@@ -1024,10 +1032,19 @@ func fail(env Env, jsonOutput bool, err error) int {
 		case code == 5:
 			stable = "unavailable"
 		}
-		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: map[string]any{}}})
+		details := map[string]any{}
+		var se *startupError
+		if errors.As(err, &se) {
+			details["phase"] = se.phase
+			if se.logPath != "" {
+				details["log_path"] = se.logPath
+			}
+		}
+		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: details}})
 	} else {
 		_, _ = fmt.Fprintf(env.Stderr, "comms: %v\n", err)
-		if code == 5 {
+		var se *startupError
+		if code == 5 && !errors.As(err, &se) {
 			_, _ = io.WriteString(env.Stderr, "Start the service with 'comms serve'.\n")
 		}
 	}

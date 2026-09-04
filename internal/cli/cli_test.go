@@ -11,6 +11,7 @@ import (
 )
 
 func TestRun(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.sock")
 	tests := []struct {
 		name       string
 		args       []string
@@ -21,7 +22,7 @@ func TestRun(t *testing.T) {
 		{name: "default help", wantCode: 0, wantStdout: "Usage:\n"},
 		{name: "help", args: []string{"help"}, wantCode: 0, wantStdout: "short-lived local topics"},
 		{name: "subcommand help", args: []string{"topic", "create", "--help"}, wantCode: 0, wantStdout: "topic create NAME [--description TEXT]"},
-		{name: "hello requires service", args: []string{"hello"}, wantCode: 5, wantStderr: "Start the service with 'comms serve'."},
+		{name: "hello requires service", args: []string{"--socket", missing, "hello"}, wantCode: 5, wantStderr: "Start the service with 'comms serve'."},
 		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "comms dev (unknown)\n"},
 		{name: "unknown", args: []string{"nope"}, wantCode: 2, wantStderr: "unknown command \"nope\""},
 		{name: "serve exclusive launch flags", args: []string{"serve", "--daemon-child", "--supervised"}, wantCode: 2, wantStderr: "mutually exclusive"},
@@ -52,7 +53,7 @@ func TestExportFailurePreservesExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
-	code := Run(Env{Args: []string{"--socket", filepath.Join(dir, "missing.sock"), "export", "--output", output}, Stderr: &stderr})
+	code := Run(Env{Args: []string{"--no-auto-start", "--socket", filepath.Join(dir, "missing.sock"), "export", "--output", output}, Stderr: &stderr})
 	if code != 5 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}

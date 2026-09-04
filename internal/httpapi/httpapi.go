@@ -11,8 +11,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcus/comms/internal/app"
@@ -782,7 +784,7 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 	}
 	resp, e := c.http.Do(req)
 	if e != nil {
-		return fmt.Errorf("%w: %w", app.ErrUnavailable, e)
+		return wrapClientError(e)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
@@ -832,7 +834,7 @@ func (c *Client) Export(ctx context.Context, w io.Writer) error {
 	}
 	resp, e := c.http.Do(req)
 	if e != nil {
-		return fmt.Errorf("%w: %w", app.ErrUnavailable, e)
+		return wrapClientError(e)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
@@ -840,4 +842,35 @@ func (c *Client) Export(ctx context.Context, w io.Writer) error {
 	}
 	_, e = io.Copy(w, resp.Body)
 	return e
+}
+
+func wrapClientError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", app.ErrUnavailable, err)
+}
+
+// IsAutoStartableDial reports whether err is a Unix dial failure that may
+// trigger CLI auto-start: ENOENT (no socket file) or ECONNREFUSED (stale
+// socket). Permission, timeout, canceled, HTTP, and protocol errors are not.
+func IsAutoStartableDial(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var op *net.OpError
+	if !errors.As(err, &op) {
+		return false
+	}
+	if op.Timeout() {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return errno == syscall.ENOENT || errno == syscall.ECONNREFUSED
+	}
+	return errors.Is(err, os.ErrNotExist)
 }
