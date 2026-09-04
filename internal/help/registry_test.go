@@ -13,7 +13,7 @@ func TestRegistryIsValidAndComplete(t *testing.T) {
 	}
 
 	wantIDs := []string{
-		"service.serve", "store.handshake", "capability.describe", "instructions.generate", "health.get", "doctor.run", "version.get",
+		"service.serve", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
 		"agent.join", "agent.whoami", "agent.get", "agent.update", "agent.retire", "agent.list",
 		"topic.create", "topic.ensure", "topic.update", "topic.archive", "topic.list", "subscription.follow", "subscription.unfollow", "subscription.list",
 		"message.publish", "message.direct_send", "message.reply", "message.inbox", "message.topic", "message.thread", "message.peek", "message.read_through", "message.receipts", "message.search", "message.observe",
@@ -162,6 +162,43 @@ func TestGeneratedDocumentsAreVersionedValidJSON(t *testing.T) {
 	}
 }
 
+func TestOpenAPIModelsActualSuccessContracts(t *testing.T) {
+	document := OpenAPIDocument()
+	paths := document["paths"].(map[string]any)
+	agentGet := paths["/v1/agents/{agent}"].(map[string]any)["get"].(map[string]any)
+	success := agentGet["responses"].(map[string]any)["200"].(map[string]any)
+	content := success["content"].(map[string]any)
+	schema := content["application/json"].(map[string]any)["schema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	if properties["schema"].(map[string]any)["const"] != ResponseSchema {
+		t.Fatalf("response schema=%#v", properties["schema"])
+	}
+	data := properties["data"].(map[string]any)
+	agentProperties := data["properties"].(map[string]any)
+	for _, field := range []string{"id", "handle", "created_at", "retired_at"} {
+		if _, ok := agentProperties[field]; !ok {
+			t.Errorf("agent response omits %s", field)
+		}
+	}
+
+	export := paths["/v1/export"].(map[string]any)["get"].(map[string]any)["responses"].(map[string]any)["200"].(map[string]any)["content"].(map[string]any)
+	if _, ok := export["application/x-ndjson"]; !ok {
+		t.Fatalf("export content=%#v", export)
+	}
+	if _, ok := export["application/json"]; ok {
+		t.Fatalf("export incorrectly claims JSON response")
+	}
+
+	for _, operation := range Operations() {
+		if operation.HTTP == nil || operation.ID == "diagnostic.export" {
+			continue
+		}
+		if responseType(operation.ID) == nil {
+			t.Errorf("operation %s has no success response type", operation.ID)
+		}
+	}
+}
+
 func TestInstructionsStateCursorAndTrustBoundaries(t *testing.T) {
 	text := InstructionsText()
 	for _, want := range []string{
@@ -185,12 +222,12 @@ func TestInstructionsStateCursorAndTrustBoundaries(t *testing.T) {
 func TestOperationsReturnsDefensiveCopy(t *testing.T) {
 	operations := Operations()
 	operations[0].ID = "changed"
-	operations[7].Parameters[0].Name = "changed"
-	operations[7].Parameters[0].Enum = []string{"changed"}
+	operations[8].Parameters[0].Name = "changed"
+	operations[8].Parameters[0].Enum = []string{"changed"}
 	operations[1].HTTP.Path = "/changed"
 
 	fresh := Operations()
-	if fresh[0].ID == "changed" || fresh[7].Parameters[0].Name == "changed" || fresh[1].HTTP.Path == "/changed" {
+	if fresh[0].ID == "changed" || fresh[8].Parameters[0].Name == "changed" || fresh[1].HTTP.Path == "/changed" {
 		t.Fatal("Operations exposed mutable registry state")
 	}
 }

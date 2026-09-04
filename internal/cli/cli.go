@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ type Env struct {
 }
 type globals struct {
 	json    bool
+	help    bool
 	as      string
 	socket  string
 	timeout time.Duration
@@ -66,6 +68,10 @@ func Run(env Env) int {
 		return fail(env, false, err)
 	}
 	r := &runner{env: env, g: g}
+	if g.help {
+		_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
+		return 0
+	}
 	if len(args) == 0 {
 		_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
 		return 0
@@ -102,6 +108,15 @@ func (r *runner) run(args []string) error {
 			return e
 		}
 		return r.output(help.Capabilities())
+	case "openapi":
+		if len(args) != 1 {
+			return usage("openapi accepts no arguments")
+		}
+		data, e := help.OpenAPIJSON()
+		if e == nil {
+			_, e = r.env.Stdout.Write(data)
+		}
+		return e
 	case "instructions":
 		if len(args) != 1 {
 			return usage("instructions accepts no arguments")
@@ -408,6 +423,9 @@ func (r *runner) topic(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return usage(err.Error())
 		}
+		if fs.NArg() != 0 {
+			return usage("unexpected topic update arguments")
+		}
 		body := map[string]any{}
 		fs.Visit(func(f *flag.Flag) {
 			switch f.Name {
@@ -666,19 +684,32 @@ func (r *runner) export(args []string) error {
 	if e != nil {
 		return e
 	}
-	writer := r.env.Stdout
-	var file *os.File
-	if *output != "" {
-		file, e = os.OpenFile(*output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if e != nil {
-			return e
-		}
-		defer func() { _ = file.Close() }()
-		writer = file
-	}
 	ctx, cancel := r.callContext()
 	defer cancel()
-	return client.Export(ctx, writer)
+	if *output == "" {
+		return client.Export(ctx, r.env.Stdout)
+	}
+	directory := filepath.Dir(*output)
+	temporary, e := os.CreateTemp(directory, ".comms-export-*.jsonl")
+	if e != nil {
+		return e
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if e = temporary.Chmod(0o600); e == nil {
+		e = client.Export(ctx, temporary)
+	}
+	if e == nil {
+		e = temporary.Sync()
+	}
+	closeErr := temporary.Close()
+	if e != nil {
+		return e
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(temporaryPath, *output)
 }
 
 func (r *runner) get(path string, q url.Values, identity bool) error {
@@ -856,6 +887,8 @@ func parseGlobals(args []string) (globals, []string, error) {
 		switch {
 		case arg == "--json":
 			g.json = true
+		case arg == "--help" || arg == "-h":
+			g.help = true
 		case arg == "--as":
 			i++
 			if i >= len(args) {
@@ -965,15 +998,19 @@ func fail(env Env, jsonOutput bool, err error) int {
 	}
 	if jsonOutput {
 		stable := "internal"
-		switch code {
-		case 2:
-			stable = "invalid_argument"
-		case 3:
-			stable = "not_found"
-		case 4:
-			stable = "conflict"
-		case 5:
-			stable = "unavailable"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			stable = "timeout"
+		} else {
+			switch code {
+			case 2:
+				stable = "invalid_argument"
+			case 3:
+				stable = "not_found"
+			case 4:
+				stable = "conflict"
+			case 5:
+				stable = "unavailable"
+			}
 		}
 		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: map[string]any{}}})
 	} else {

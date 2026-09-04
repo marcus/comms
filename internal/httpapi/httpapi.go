@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ResponseSchema = "comms.response.v1"
+	ResponseSchema = help.ResponseSchema
 	AgentHeader    = "X-Comms-Agent-ID"
 )
 
@@ -81,7 +81,16 @@ func NewHandler(service *app.Service) http.Handler {
 	mux.HandleFunc("POST /v1/purge", h.purge)
 	mux.HandleFunc("GET /v1/export", h.export)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := validateQueryBoundary(r); err != nil {
+		operation, pathKnown := findOperation(r)
+		if operation == nil {
+			if pathKnown {
+				h.respondStatus(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			} else {
+				h.respondStatus(w, http.StatusNotFound, "not_found", "route not found")
+			}
+			return
+		}
+		if err := validateQueryBoundary(r, *operation); err != nil {
 			h.respond(w, nil, err)
 			return
 		}
@@ -89,18 +98,22 @@ func NewHandler(service *app.Service) http.Handler {
 	})
 }
 
-func validateQueryBoundary(r *http.Request) error {
-	var operation *help.Operation
+func findOperation(r *http.Request) (*help.Operation, bool) {
+	pathKnown := false
 	for _, candidate := range help.Operations() {
-		if candidate.HTTP != nil && candidate.HTTP.Method == r.Method && matchPath(candidate.HTTP.Path, r.URL.Path) {
+		if candidate.HTTP == nil || !matchPath(candidate.HTTP.Path, r.URL.Path) {
+			continue
+		}
+		pathKnown = true
+		if candidate.HTTP.Method == r.Method {
 			copy := candidate
-			operation = &copy
-			break
+			return &copy, true
 		}
 	}
-	if operation == nil {
-		return nil
-	}
+	return nil, pathKnown
+}
+
+func validateQueryBoundary(r *http.Request, operation help.Operation) error {
 	allowed := map[string]help.Parameter{}
 	for _, parameter := range operation.Parameters {
 		if parameter.Location == help.QueryParameter {
@@ -215,11 +228,19 @@ func (h *Handler) getAgent(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, v, e)
 }
 func (h *Handler) updateAgent(w http.ResponseWriter, r *http.Request) {
-	var req app.UpdateAgentRequest
-	if !h.decode(w, r, &req) {
+	var wire struct {
+		app.Mutation
+		Handle      *string `json:"handle,omitempty"`
+		DisplayName *string `json:"display_name,omitempty"`
+		Purpose     *string `json:"purpose,omitempty"`
+		Harness     *string `json:"harness,omitempty"`
+		Project     *string `json:"project,omitempty"`
+		SessionRef  *string `json:"session_ref,omitempty"`
+	}
+	if !h.decode(w, r, &wire) {
 		return
 	}
-	req.Agent = r.PathValue("agent")
+	req := app.UpdateAgentRequest{Mutation: wire.Mutation, Agent: r.PathValue("agent"), Handle: wire.Handle, DisplayName: wire.DisplayName, Purpose: wire.Purpose, Harness: wire.Harness, Project: wire.Project, SessionRef: wire.SessionRef}
 	v, e := h.app.UpdateAgent(r.Context(), req)
 	h.respond(w, v, e)
 }
@@ -264,11 +285,15 @@ func (h *Handler) ensureTopic(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, v, e)
 }
 func (h *Handler) updateTopic(w http.ResponseWriter, r *http.Request) {
-	var req app.UpdateTopicRequest
-	if !h.decode(w, r, &req) {
+	var wire struct {
+		app.Mutation
+		Name        *string `json:"name,omitempty"`
+		Description *string `json:"description,omitempty"`
+	}
+	if !h.decode(w, r, &wire) {
 		return
 	}
-	req.Topic = r.PathValue("topic")
+	req := app.UpdateTopicRequest{Mutation: wire.Mutation, Topic: r.PathValue("topic"), Name: wire.Name, Description: wire.Description}
 	v, e := h.app.UpdateTopic(r.Context(), req)
 	h.respond(w, v, e)
 }
@@ -576,6 +601,12 @@ func (h *Handler) respond(w http.ResponseWriter, value any, err error) {
 		return
 	}
 	_ = json.NewEncoder(w).Encode(responseEnvelope{Schema: ResponseSchema, Data: value})
+}
+
+func (h *Handler) respondStatus(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(ErrorEnvelope{Error: ErrorBody{Code: code, Message: message, Details: map[string]any{}}})
 }
 
 func classify(err error) (int, string) {

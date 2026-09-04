@@ -67,8 +67,11 @@ func TestNetworkBoundaryRejectsUnknownAndMalformedInputs(t *testing.T) {
 	handler := NewHandler(nil)
 	tests := []struct{ name, method, target, body string }{
 		{name: "unknown query", method: http.MethodGet, target: "/v1/capabilities?surprise=true"},
+		{name: "OpenAPI unknown query", method: http.MethodGet, target: "/v1/openapi.json?surprise=true"},
 		{name: "bad query type", method: http.MethodGet, target: "/v1/agents?limit=many"},
 		{name: "unknown body", method: http.MethodPost, target: "/v1/agents/join", body: `{"surprise":true}`},
+		{name: "path duplicate agent", method: http.MethodPatch, target: "/v1/agents/example", body: `{"agent":"other"}`},
+		{name: "path duplicate topic", method: http.MethodPatch, target: "/v1/topics/example", body: `{"topic":"other"}`},
 		{name: "multiple objects", method: http.MethodPost, target: "/v1/agents/join", body: `{} {}`},
 	}
 	for _, test := range tests {
@@ -84,6 +87,32 @@ func TestNetworkBoundaryRejectsUnknownAndMalformedInputs(t *testing.T) {
 				t.Fatal(err)
 			}
 			if envelope.Error.Code != "invalid_argument" {
+				t.Fatalf("error=%#v", envelope.Error)
+			}
+		})
+	}
+}
+
+func TestUnknownRoutesAndMethodsUseJSONErrors(t *testing.T) {
+	handler := NewHandler(nil)
+	for _, test := range []struct {
+		name, method, target, code string
+		status                     int
+	}{
+		{name: "route", method: http.MethodGet, target: "/v1/missing", status: http.StatusNotFound, code: "not_found"},
+		{name: "method", method: http.MethodPost, target: "/v1/capabilities", status: http.StatusMethodNotAllowed, code: "method_not_allowed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, httptest.NewRequest(test.method, test.target, nil))
+			if recorder.Code != test.status {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var envelope ErrorEnvelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Code != test.code {
 				t.Fatalf("error=%#v", envelope.Error)
 			}
 		})
