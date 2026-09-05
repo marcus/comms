@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.2.0] - 2026-09-04
 
 - Exclude the reading agent's own messages from `comms inbox` by default so
   the inbox shows incoming work, with `--include-self` (`include_self` over
