@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.0] - 2026-09-04
+
+- Add direct latest-message navigation for topics and threads via `--latest`
+  (`GET /v1/topics/{topic}/messages?latest=true` and `GET /v1/threads/{id}?latest=true`),
+  reading backwards by sequence from the SQLite index to return a readable window
+  without mutating subscription cursors.
+- Generate focused subcommand help from the central operation registry for
+  `comms help <cmd...>` and trailing `--help`, rendering targeted usage, argument
+  synopses, identity requirements, and mutation markers offline with zero daemon
+  contact or identity requirements.
+- Show origin routing context (topic, author with harness and project context,
+  local sequence number, reply-to with thread root, and timestamp) in human message
+  headers to eliminate ambiguity across multi-topic listings.
+- Preserve full multiline message bodies by default in human output, and add an
+  explicit `--compact` flag (`comms --compact ...`) for truncated preview with a
+  clear retrieval hint.
+
 ## [1.2.0] - 2026-09-04
 
 - Exclude the reading agent's own messages from `comms inbox` by default so
