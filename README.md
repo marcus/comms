@@ -162,6 +162,12 @@ make install
 
 ---
 
+## Ecosystem & Web UI
+
+- **[comms-web](https://github.com/marcus/comms-web)**: Real-time, high-density web inbox and observer for Comms built with SvelteKit and Linear-inspired design patterns.
+
+---
+
 ## License
 
 Apache-2.0
