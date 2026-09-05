@@ -274,11 +274,11 @@ derived=$(cd "$derive_repo" && RELEASE_VERSION= BUMP=major derive_release_versio
 derived=$(cd "$derive_repo" && RELEASE_VERSION= BUMP=patch derive_release_version) ||
   fail "BUMP=patch did not derive a version from Unreleased"
 [[ $derived == $'v1.0.1\tstamp' ]] || fail "BUMP=patch derived '$derived', want v1.0.1 stamp"
-derived=$(cd "$derive_repo" && RELEASE_VERSION=v1.2.0 derive_release_version) ||
+derived=$(cd "$derive_repo" && RELEASE_VERSION=v1.2.0 BUMP= derive_release_version) ||
   fail "RELEASE_VERSION did not stamp Unreleased"
 [[ $derived == $'v1.2.0\tstamp' ]] || fail "explicit Unreleased stamp derived '$derived'"
 
-if (cd "$derive_repo" && RELEASE_VERSION= derive_release_version) >/dev/null 2>&1; then
+if (cd "$derive_repo" && RELEASE_VERSION= BUMP= derive_release_version) >/dev/null 2>&1; then
   fail "Unreleased heading derived a version without BUMP or RELEASE_VERSION"
 fi
 
@@ -306,10 +306,10 @@ cat >"$derive_repo/CHANGELOG.md" <<'EOF'
 
 - First release.
 EOF
-derived=$(cd "$derive_repo" && RELEASE_VERSION= derive_release_version) ||
+derived=$(cd "$derive_repo" && RELEASE_VERSION= BUMP= derive_release_version) ||
   fail "already-stamped heading did not derive a version"
 [[ $derived == $'v1.3.0\tready' ]] || fail "stamped heading derived '$derived', want v1.3.0 ready"
-if (cd "$derive_repo" && RELEASE_VERSION=v1.4.0 derive_release_version) >/dev/null 2>&1; then
+if (cd "$derive_repo" && RELEASE_VERSION=v1.4.0 BUMP= derive_release_version) >/dev/null 2>&1; then
   fail "RELEASE_VERSION that contradicts a stamped heading was accepted"
 fi
 
