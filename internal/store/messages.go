@@ -224,6 +224,35 @@ func pageMessages(ctx context.Context, db *sql.DB, query string, args []any, lim
 	return out, nil
 }
 
+func pageMessagesLatestSequence(ctx context.Context, read *sql.DB, query string, args []any, limit int) (app.Page[domain.Message], error) {
+	rows, e := read.QueryContext(ctx, query, args...)
+	if e != nil {
+		return app.Page[domain.Message]{}, e
+	}
+	defer func() { _ = rows.Close() }()
+	out := app.Page[domain.Message]{Items: []domain.Message{}}
+	for rows.Next() {
+		m, e := scanMessage(rows)
+		if e != nil {
+			return out, e
+		}
+		out.Items = append(out.Items, m)
+	}
+	if e = rows.Err(); e != nil {
+		return out, e
+	}
+	if len(out.Items) > limit {
+		last := out.Items[limit-1]
+		out.Items = out.Items[:limit]
+		out.NextCursor = encodeCursor(strconv.FormatInt(last.Sequence, 10), string(last.ID))
+	}
+	// Reverse items in place so the returned window is rendered oldest-to-newest for readability.
+	for i, j := 0, len(out.Items)-1; i < j; i, j = i+1, j-1 {
+		out.Items[i], out.Items[j] = out.Items[j], out.Items[i]
+	}
+	return out, nil
+}
+
 // pairCursor decodes the shared opaque (position, id) continuation encoding.
 // The position is a created_at stamp for time-ordered pages and a topic
 // sequence for sequence-ordered pages; either way an empty cursor means start
@@ -348,6 +377,14 @@ func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest,
 	if e != nil {
 		return app.Page[domain.Message]{}, e
 	}
+	if req.Latest {
+		seq, id, e := pairCursor(req.Cursor)
+		if e != nil {
+			return app.Page[domain.Message]{}, e
+		}
+		query := "SELECT " + messageCols + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
+		return pageMessagesLatestSequence(ctx, a.read, query, []any{t.ID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
+	}
 	seq, id, e := ascendingCursor(req.Cursor)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
@@ -359,6 +396,14 @@ func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Ti
 	m, e := resolveMessage(ctx, a.read, req.Message)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
+	}
+	if req.Latest {
+		seq, id, e := pairCursor(req.Cursor)
+		if e != nil {
+			return app.Page[domain.Message]{}, e
+		}
+		query := "SELECT " + messageCols + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
+		return pageMessagesLatestSequence(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
 	}
 	seq, id, e := ascendingCursor(req.Cursor)
 	if e != nil {

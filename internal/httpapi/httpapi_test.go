@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -438,4 +439,131 @@ func TestIsAutoStartableDial(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestTopicMessagesAndThreadLatestNavigation(t *testing.T) {
+	adapter, err := store.Open(context.Background(), store.Options{Path: filepath.Join(t.TempDir(), "comms.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close() })
+	svc := app.NewService(adapter, domain.UTCClock{})
+	server := httptest.NewServer(NewHandler(svc))
+	t.Cleanup(server.Close)
+
+	ctx := context.Background()
+	_, err = svc.Join(ctx, app.JoinRequest{Handle: "sender"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic, err := svc.CreateTopic(ctx, app.CreateTopicRequest{Name: "stream"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Follow(ctx, app.FollowRequest{Agent: "sender", Topic: topic.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= 6; i++ {
+		_, err := svc.Publish(ctx, app.PublishRequest{
+			Author: "sender",
+			Topic:  topic.Name,
+			Title:  fmt.Sprintf("item-%02d", i),
+			Body:   fmt.Sprintf("body %d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Test GET /v1/topics/{topic}/messages?latest=true&limit=3
+	res, err := server.Client().Get(server.URL + "/v1/topics/stream/messages?latest=true&limit=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var doc struct {
+		Data struct {
+			Items      []map[string]any `json:"items"`
+			NextCursor string           `json:"next_cursor"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Data.Items) != 3 {
+		t.Fatalf("got %d items, want 3", len(doc.Data.Items))
+	}
+	if doc.Data.Items[0]["title"] != "item-04" || doc.Data.Items[2]["title"] != "item-06" {
+		t.Fatalf("items = %#v", doc.Data.Items)
+	}
+	if doc.Data.NextCursor == "" {
+		t.Fatal("expected next cursor for backward pagination")
+	}
+
+	// Paginate backward with cursor:
+	resPage2, err := server.Client().Get(server.URL + "/v1/topics/stream/messages?latest=true&limit=3&cursor=" + doc.Data.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resPage2.Body.Close()
+	if resPage2.StatusCode != http.StatusOK {
+		t.Fatalf("page 2 status = %d", resPage2.StatusCode)
+	}
+	var docPage2 struct {
+		Data struct {
+			Items      []map[string]any `json:"items"`
+			NextCursor string           `json:"next_cursor"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resPage2.Body).Decode(&docPage2); err != nil {
+		t.Fatal(err)
+	}
+	if len(docPage2.Data.Items) != 3 || docPage2.Data.Items[0]["title"] != "item-01" || docPage2.Data.Items[2]["title"] != "item-03" {
+		t.Fatalf("page 2 items = %#v", docPage2.Data.Items)
+	}
+	if docPage2.Data.NextCursor != "" {
+		t.Fatalf("reached beginning, expected empty next_cursor, got %q", docPage2.Data.NextCursor)
+	}
+
+	// Test thread latest navigation
+	rootID := docPage2.Data.Items[0]["id"].(string)
+	for i := 1; i <= 5; i++ {
+		_, err := svc.Reply(ctx, app.ReplyRequest{
+			Author: "sender",
+			Parent: rootID,
+			Title:  fmt.Sprintf("reply-%02d", i),
+			Body:   fmt.Sprintf("reply body %d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resThread, err := server.Client().Get(server.URL + "/v1/messages/" + rootID + "/thread?latest=true&limit=3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resThread.Body.Close()
+	if resThread.StatusCode != http.StatusOK {
+		t.Fatalf("thread status = %d", resThread.StatusCode)
+	}
+	var docThread struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resThread.Body).Decode(&docThread); err != nil {
+		t.Fatal(err)
+	}
+	if len(docThread.Data.Items) != 3 {
+		t.Fatalf("got %d thread items, want 3", len(docThread.Data.Items))
+	}
+	if docThread.Data.Items[0]["title"] != "reply-03" || docThread.Data.Items[2]["title"] != "reply-05" {
+		t.Fatalf("thread items = %#v", docThread.Data.Items)
+	}
 }

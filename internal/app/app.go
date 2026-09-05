@@ -248,6 +248,7 @@ type MessageListRequest struct {
 	// moves, and topic history, thread, peek, search, observe, receipts, and
 	// export are unaffected.
 	IncludeSelf bool `json:"include_self,omitempty"`
+	Latest      bool `json:"latest,omitempty"`
 }
 
 // Wait timeouts are always bounded. A caller may shorten the default but may
@@ -297,6 +298,7 @@ type MessageWaitResponse struct {
 type ThreadRequest struct {
 	PageRequest
 	Message string `json:"message"`
+	Latest  bool   `json:"latest,omitempty"`
 }
 type ReadThroughRequest struct {
 	Mutation

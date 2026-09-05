@@ -572,7 +572,7 @@ func (h *Handler) topicMessages(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.TopicMessages(r.Context(), app.MessageListRequest{PageRequest: p, Topic: r.PathValue("topic")})
+	v, e := h.app.TopicMessages(r.Context(), app.MessageListRequest{PageRequest: p, Topic: r.PathValue("topic"), Latest: boolQuery(r, "latest")})
 	h.respond(w, v, e)
 }
 func (h *Handler) thread(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +581,7 @@ func (h *Handler) thread(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Thread(r.Context(), app.ThreadRequest{PageRequest: p, Message: r.PathValue("message")})
+	v, e := h.app.Thread(r.Context(), app.ThreadRequest{PageRequest: p, Message: r.PathValue("message"), Latest: boolQuery(r, "latest")})
 	h.respond(w, v, e)
 }
 func (h *Handler) peek(w http.ResponseWriter, r *http.Request) {

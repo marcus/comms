@@ -250,3 +250,151 @@ func marshalDocument(value any) ([]byte, error) {
 	}
 	return output.Bytes(), nil
 }
+
+// CommandHelp generates focused help for a registered CLI command or command group.
+func CommandHelp(program string, commandArgs ...string) (string, error) {
+	if program == "" {
+		program = "comms"
+	}
+	if len(commandArgs) == 0 {
+		return CLIUsage(program), nil
+	}
+
+	tokens := make([]string, 0, len(commandArgs))
+	for _, arg := range commandArgs {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if arg != "" {
+			tokens = append(tokens, arg)
+		}
+	}
+	if len(tokens) == 0 {
+		return CLIUsage(program), nil
+	}
+
+	operations := Operations()
+
+	// 1. Longest command prefix match against registered operations
+	for prefixLen := len(tokens); prefixLen >= 1; prefixLen-- {
+		prefix := strings.Join(tokens[:prefixLen], " ")
+		for _, op := range operations {
+			if op.CLI == "" {
+				continue
+			}
+			opTokens := extractCommandTokens(op.CLI)
+			if strings.Join(opTokens, " ") == prefix {
+				return renderOperationHelp(program, op), nil
+			}
+		}
+	}
+
+	// 2. Group match (e.g. "topic", "agent", "retention")
+	group := tokens[0]
+	var groupOps []Operation
+	for _, op := range operations {
+		if op.CLI == "" {
+			continue
+		}
+		opTokens := extractCommandTokens(op.CLI)
+		if len(opTokens) > 1 && opTokens[0] == group {
+			groupOps = append(groupOps, op)
+		}
+	}
+	if len(groupOps) > 0 {
+		return renderGroupHelp(program, group, groupOps), nil
+	}
+
+	return "", fmt.Errorf("unknown command %q; run '%s help'", strings.Join(tokens, " "), program)
+}
+
+func extractCommandTokens(cliSynopsis string) []string {
+	words := strings.Fields(cliSynopsis)
+	tokens := make([]string, 0, len(words))
+	for _, w := range words {
+		if strings.HasPrefix(w, "-") || strings.HasPrefix(w, "[") {
+			break
+		}
+		if strings.HasPrefix(w, "@") {
+			break
+		}
+		if w == strings.ToUpper(w) && strings.ToLower(w) != strings.ToUpper(w) {
+			break
+		}
+		tokens = append(tokens, w)
+	}
+	return tokens
+}
+
+func renderOperationHelp(program string, op Operation) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Usage:\n  %s %s\n\n", program, op.CLI)
+	fmt.Fprintf(&b, "Summary:\n  %s\n\n", op.Summary)
+	fmt.Fprintf(&b, "Description:\n  %s\n", op.Description)
+
+	if len(op.Parameters) > 0 {
+		fmt.Fprintf(&b, "\nParameters / Flags:\n")
+		for _, p := range op.Parameters {
+			label := formatParameterLabel(p, op.CLI)
+			fmt.Fprintf(&b, "  %-24s %s\n", label, p.Description)
+		}
+	}
+
+	if op.RequiresIdentity {
+		fmt.Fprintf(&b, "\nIdentity:\n  Requires an active agent session (pass --as AGENT or set COMMS_CONTEXT).\n")
+	} else {
+		fmt.Fprintf(&b, "\nIdentity:\n  CLI-only; does not require an agent identity.\n")
+	}
+
+	if op.Mutating {
+		fmt.Fprintf(&b, "\nMutation:\n  Mutating operation; creates or modifies local state.\n")
+	}
+
+	return b.String()
+}
+
+func formatParameterLabel(p Parameter, cliSynopsis string) string {
+	if p.Location == PathParameter {
+		return strings.ToUpper(p.Name) + " (positional)"
+	}
+	flagName := "--" + strings.ReplaceAll(p.Name, "_", "-")
+	if p.Name == "metadata" && strings.Contains(cliSynopsis, "--metadata-json") {
+		return "--metadata-json JSON"
+	}
+	if p.Type == "boolean" {
+		return flagName
+	}
+	idx := strings.Index(cliSynopsis, flagName+" ")
+	if idx != -1 {
+		rest := cliSynopsis[idx:]
+		fields := strings.Fields(rest)
+		if len(fields) >= 2 {
+			cleanField := strings.TrimRight(fields[1], "]")
+			return flagName + " " + cleanField
+		}
+	}
+	switch p.Type {
+	case "integer":
+		return flagName + " N"
+	case "string":
+		if p.Format == "duration" || strings.Contains(p.Name, "duration") || p.Name == "timeout" || p.Name == "expires_in" {
+			return flagName + " DURATION"
+		}
+		if p.Name == "cursor" || p.Name == "after" {
+			return flagName + " CURSOR"
+		}
+		return flagName + " TEXT"
+	default:
+		return flagName
+	}
+}
+
+func renderGroupHelp(program string, group string, ops []Operation) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Usage:\n  %s %s COMMAND\n\nCommands:\n", program, group)
+	for _, op := range ops {
+		fmt.Fprintf(&b, "  %-60s %s\n", program+" "+op.CLI, op.Summary)
+	}
+	fmt.Fprintf(&b, "\nRun '%s <command> --help' for details on a specific command.\n", program)
+	return b.String()
+}

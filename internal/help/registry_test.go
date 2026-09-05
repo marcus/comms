@@ -291,3 +291,111 @@ func TestOperationsReturnsDefensiveCopy(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandHelpResolvesEveryRegisteredCommand(t *testing.T) {
+	for _, op := range Operations() {
+		if op.CLI == "" {
+			continue
+		}
+		tokens := extractCommandTokens(op.CLI)
+		helpText, err := CommandHelp("comms", tokens...)
+		if err != nil {
+			t.Fatalf("CommandHelp failed for %s: %v", op.ID, err)
+		}
+		if !strings.Contains(helpText, op.Summary) {
+			t.Errorf("help for %s omits summary %q", op.ID, op.Summary)
+		}
+		if !strings.Contains(helpText, op.Description) {
+			t.Errorf("help for %s omits description %q", op.ID, op.Description)
+		}
+		if !strings.Contains(helpText, op.CLI) {
+			t.Errorf("help for %s omits CLI synopsis %q", op.ID, op.CLI)
+		}
+		if op.RequiresIdentity {
+			if !strings.Contains(helpText, "Requires an active agent session") {
+				t.Errorf("help for %s omits identity requirement", op.ID)
+			}
+		} else {
+			if !strings.Contains(helpText, "CLI-only; does not require an agent identity") {
+				t.Errorf("help for %s omits non-identity note", op.ID)
+			}
+		}
+	}
+}
+
+func TestCommandHelpSpecificSemantics(t *testing.T) {
+	// 1. wait --help explains preexisting unread delivery, after cursor resumption,
+	// no read-through mutation, self exclusion, bounded default/max timeout and exit behavior.
+	waitHelp, err := CommandHelp("comms", "wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"preexisting unread",
+		"after cursor",
+		"does not mark messages read",
+		"advance a read-through cursor",
+		"include_self",
+		"30s",
+		"1h",
+		"exit 0",
+		"exit 5",
+		"exit 2",
+	} {
+		if !strings.Contains(strings.ToLower(waitHelp), strings.ToLower(want)) {
+			t.Errorf("wait --help omits %q:\n%s", want, waitHelp)
+		}
+	}
+
+	// 2. topic messages --help describes ordering and cursors.
+	topicMsgHelp, err := CommandHelp("comms", "topic", "messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ascending",
+		"latest",
+		"cursor",
+	} {
+		if !strings.Contains(strings.ToLower(topicMsgHelp), strings.ToLower(want)) {
+			t.Errorf("topic messages --help omits %q:\n%s", want, topicMsgHelp)
+		}
+	}
+
+	// 3. Group command help
+	topicGroupHelp, err := CommandHelp("comms", "topic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"topic create",
+		"topic ensure",
+		"topic update",
+		"topic archive",
+		"topic follow",
+		"topic unfollow",
+		"topic messages",
+	} {
+		if !strings.Contains(topicGroupHelp, want) {
+			t.Errorf("topic group help omits %q:\n%s", want, topicGroupHelp)
+		}
+	}
+
+	// 4. Unknown command fails clearly
+	_, err = CommandHelp("comms", "unknown-subcommand")
+	if err == nil {
+		t.Fatal("expected error for unknown command")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 5. Empty args returns global usage
+	globalHelp, err := CommandHelp("comms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(globalHelp, "Usage:\n  comms [--json] [--as AGENT] COMMAND") {
+		t.Fatalf("empty args did not return global usage:\n%s", globalHelp)
+	}
+}

@@ -49,6 +49,7 @@ type Env struct {
 }
 type globals struct {
 	json        bool
+	compact     bool
 	help        bool
 	as          string
 	socket      string
@@ -101,11 +102,31 @@ func Run(env Env) int {
 		}
 	}()
 	if g.help {
-		_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
+		if len(args) == 0 {
+			_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
+			return 0
+		}
+		text, err := help.CommandHelp("comms", args...)
+		if err != nil {
+			return fail(env, g.json, usage(err.Error()))
+		}
+		_, _ = io.WriteString(env.Stdout, text)
 		return 0
 	}
 	if len(args) == 0 {
 		_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
+		return 0
+	}
+	if args[0] == "help" {
+		if len(args) == 1 {
+			_, _ = io.WriteString(env.Stdout, help.CLIUsage("comms"))
+			return 0
+		}
+		text, err := help.CommandHelp("comms", args[1:]...)
+		if err != nil {
+			return fail(env, g.json, usage(err.Error()))
+		}
+		_, _ = io.WriteString(env.Stdout, text)
 		return 0
 	}
 	if err = r.run(args); err != nil {
@@ -951,15 +972,15 @@ func (r *runner) output(value any) error {
 	if r.g.json {
 		return json.NewEncoder(r.env.Stdout).Encode(map[string]any{"schema": cliSchema, "data": value})
 	}
-	return renderHuman(r.env.Stdout, value)
+	return renderHuman(r.env.Stdout, value, r.g.compact)
 }
 
-func renderHuman(w io.Writer, value any) error {
+func renderHuman(w io.Writer, value any, compact bool) error {
 	switch v := value.(type) {
 	case map[string]any:
 		if items, ok := v["items"].([]any); ok {
 			for _, item := range items {
-				if err := renderHuman(w, item); err != nil {
+				if err := renderHuman(w, item, compact); err != nil {
 					return err
 				}
 			}
@@ -972,7 +993,7 @@ func renderHuman(w io.Writer, value any) error {
 			return nil
 		}
 		if agent, ok := v["agent"].(map[string]any); ok {
-			if err := renderHuman(w, agent); err != nil {
+			if err := renderHuman(w, agent, compact); err != nil {
 				return err
 			}
 			for _, key := range []string{"source", "identity_source", "context"} {
@@ -987,11 +1008,8 @@ func renderHuman(w io.Writer, value any) error {
 				_, err := fmt.Fprintf(w, "@%s\t%s\n", handle, id)
 				return err
 			}
-			if body, ok := v["body"].(string); ok {
-				title, _ := v["title"].(string)
-				sequence := v["sequence"]
-				_, err := fmt.Fprintf(w, "%s\t#%v\t%s\n%s\n", id, sequence, title, body)
-				return err
+			if _, ok := v["body"].(string); ok {
+				return renderMessage(w, v, compact)
 			}
 			if name, _ := v["name"].(string); name != "" {
 				_, err := fmt.Fprintf(w, "%s\t%s\n", name, id)
@@ -1021,7 +1039,7 @@ func renderHuman(w io.Writer, value any) error {
 		return nil
 	case []any:
 		for _, item := range v {
-			if err := renderHuman(w, item); err != nil {
+			if err := renderHuman(w, item, compact); err != nil {
 				return err
 			}
 		}
@@ -1036,6 +1054,89 @@ func renderHuman(w io.Writer, value any) error {
 	}
 }
 
+func renderMessage(w io.Writer, v map[string]any, compact bool) error {
+	id, _ := v["id"].(string)
+	seq := v["sequence"]
+	topicID, _ := v["topic_id"].(string)
+	authorID, _ := v["author_id"].(string)
+	createdAt, _ := v["created_at"].(string)
+	inReplyTo, _ := v["in_reply_to"].(string)
+	threadRootID, _ := v["thread_root_id"].(string)
+	title, _ := v["title"].(string)
+	body, _ := v["body"].(string)
+
+	var headerParts []string
+	if id != "" {
+		headerParts = append(headerParts, id)
+	}
+	if seq != nil {
+		headerParts = append(headerParts, fmt.Sprintf("#%v", seq))
+	}
+	if topicID != "" {
+		headerParts = append(headerParts, "topic:"+topicID)
+	}
+	if authorID != "" {
+		authorStr := "author:" + authorID
+		if authorCtx, ok := v["author_context"].(map[string]any); ok {
+			harness, _ := authorCtx["harness"].(string)
+			project, _ := authorCtx["project"].(string)
+			switch {
+			case harness != "" && project != "":
+				authorStr += fmt.Sprintf(" (%s/%s)", harness, project)
+			case harness != "":
+				authorStr += fmt.Sprintf(" (%s)", harness)
+			case project != "":
+				authorStr += fmt.Sprintf(" (%s)", project)
+			}
+		}
+		headerParts = append(headerParts, authorStr)
+	}
+	if inReplyTo != "" {
+		replyStr := "reply-to:" + inReplyTo
+		if threadRootID != "" && threadRootID != inReplyTo {
+			replyStr += " (root:" + threadRootID + ")"
+		}
+		headerParts = append(headerParts, replyStr)
+	}
+	if createdAt != "" {
+		headerParts = append(headerParts, createdAt)
+	}
+
+	header := strings.Join(headerParts, "  ")
+	if _, err := fmt.Fprintf(w, "%s\n", header); err != nil {
+		return err
+	}
+	if title != "" {
+		if _, err := fmt.Fprintf(w, "Title: %s\n", title); err != nil {
+			return err
+		}
+	}
+
+	renderedBody := body
+	if compact {
+		lines := strings.Split(body, "\n")
+		firstLine := strings.TrimRight(lines[0], "\r")
+		if len(lines) > 1 || len(firstLine) > 80 {
+			preview := firstLine
+			if len(preview) > 80 {
+				preview = preview[:80]
+			}
+			renderedBody = fmt.Sprintf("%s ... [truncated; use 'comms peek %s' for full body]", preview, id)
+		}
+	}
+	cleanedBody := strings.TrimRight(renderedBody, "\n")
+	if cleanedBody != "" {
+		if _, err := fmt.Fprintf(w, "%s\n\n", cleanedBody); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintf(w, "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func parseGlobals(args []string) (globals, []string, error) {
 	g := globals{timeout: defaultCommandTimeout}
 	rest := make([]string, 0, len(args))
@@ -1044,6 +1145,8 @@ func parseGlobals(args []string) (globals, []string, error) {
 		switch {
 		case arg == "--json":
 			g.json = true
+		case arg == "--compact":
+			g.compact = true
 		case arg == "--help" || arg == "-h":
 			g.help = true
 		case arg == "--as":
@@ -1092,6 +1195,7 @@ func listQuery(name string, args []string, all bool) (url.Values, error) {
 	fs := newFlagSet(name)
 	limit := fs.Int("limit", 0, "")
 	cursor := fs.String("cursor", "", "")
+	latest := fs.Bool("latest", false, "")
 	var includeAll *bool
 	if all {
 		includeAll = fs.Bool("all", false, "")
@@ -1105,6 +1209,9 @@ func listQuery(name string, args []string, all bool) (url.Values, error) {
 	q := url.Values{}
 	setInt(q, "limit", *limit)
 	set(q, "cursor", *cursor)
+	if *latest {
+		setBool(q, "latest", true)
+	}
 	if includeAll != nil {
 		setBool(q, "all", *includeAll)
 	}

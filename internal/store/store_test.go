@@ -1297,3 +1297,196 @@ func TestFollowingATopicWakesABlockedWaiter(t *testing.T) {
 		t.Fatal("following a topic with unread messages did not wake the waiter")
 	}
 }
+
+func TestLatestMessageNavigationForTopicsAndThreads(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	topic := createTopic(t, sys.service, "demo-latest")
+	follow(t, sys.service, alice, topic)
+
+	// 1. Equal timestamps: append 15 messages all sharing the exact same timestamp.
+	const total = 15
+	for i := 1; i <= total; i++ {
+		publish(t, sys, "alice", "demo-latest", fmt.Sprintf("msg-%02d", i))
+	}
+
+	// Verify existing ascending default ordering remains compatible (limit 5).
+	ascPage1, err := sys.service.TopicMessages(ctx, app.MessageListRequest{Topic: "demo-latest", PageRequest: app.PageRequest{Limit: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ascPage1.Items) != 5 || ascPage1.Items[0].Title != "msg-01" || ascPage1.Items[4].Title != "msg-05" {
+		t.Fatalf("asc page 1 titles = %v", messageTitles(ascPage1.Items))
+	}
+	if ascPage1.NextCursor == "" {
+		t.Fatal("asc page 1 missing next cursor")
+	}
+	ascPage2, err := sys.service.TopicMessages(ctx, app.MessageListRequest{Topic: "demo-latest", PageRequest: app.PageRequest{Limit: 5, Cursor: ascPage1.NextCursor}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ascPage2.Items) != 5 || ascPage2.Items[0].Title != "msg-06" || ascPage2.Items[4].Title != "msg-10" {
+		t.Fatalf("asc page 2 titles = %v", messageTitles(ascPage2.Items))
+	}
+
+	// 2. Direct latest window: returns last 5 messages directly (msg-11 to msg-15)
+	// rendered oldest-to-newest within that window for readability.
+	latestPage1, err := sys.service.TopicMessages(ctx, app.MessageListRequest{
+		Topic:       "demo-latest",
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latestPage1.Items) != 5 {
+		t.Fatalf("expected 5 items, got %d", len(latestPage1.Items))
+	}
+	wantP1 := []string{"msg-11", "msg-12", "msg-13", "msg-14", "msg-15"}
+	if !equalTitles(messageTitles(latestPage1.Items), wantP1) {
+		t.Fatalf("latest page 1 = %v, want %v", messageTitles(latestPage1.Items), wantP1)
+	}
+	if latestPage1.NextCursor == "" {
+		t.Fatal("latest page 1 should have next cursor for backwards pagination")
+	}
+
+	// 3. Paginate backwards from latest window cursor
+	latestPage2, err := sys.service.TopicMessages(ctx, app.MessageListRequest{
+		Topic:       "demo-latest",
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 5, Cursor: latestPage1.NextCursor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantP2 := []string{"msg-06", "msg-07", "msg-08", "msg-09", "msg-10"}
+	if !equalTitles(messageTitles(latestPage2.Items), wantP2) {
+		t.Fatalf("latest page 2 = %v, want %v", messageTitles(latestPage2.Items), wantP2)
+	}
+
+	latestPage3, err := sys.service.TopicMessages(ctx, app.MessageListRequest{
+		Topic:       "demo-latest",
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 5, Cursor: latestPage2.NextCursor},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantP3 := []string{"msg-01", "msg-02", "msg-03", "msg-04", "msg-05"}
+	if !equalTitles(messageTitles(latestPage3.Items), wantP3) {
+		t.Fatalf("latest page 3 = %v, want %v", messageTitles(latestPage3.Items), wantP3)
+	}
+	if latestPage3.NextCursor != "" {
+		t.Fatalf("latest page 3 reached the beginning, next cursor should be empty, got %q", latestPage3.NextCursor)
+	}
+
+	// 4. Reading recent history never advances acknowledgement
+	subs, err := sys.service.Subscriptions(ctx, app.SubscriptionListRequest{Agent: string(alice.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs.Items) == 0 || subs.Items[0].ReadThroughSequence != 0 {
+		t.Fatalf("reading latest history modified read through sequence to %v", subs.Items)
+	}
+
+	// 5. Expiry: messages with expiry in the past are excluded.
+	// Publish with short future expiry and advance clock past expiration:
+	sys.clock.Advance(time.Minute)
+	futureInstant := sys.clock.Now().Add(5 * time.Second)
+	_, err = sys.service.Publish(ctx, app.PublishRequest{
+		Author: "alice",
+		Topic:  "demo-latest",
+		Title:  "will-expire",
+		Body:   "temporary",
+		Expiry: app.Expiry{At: &futureInstant},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Also publish a live message:
+	publish(t, sys, "alice", "demo-latest", "msg-16-live")
+
+	// Advance clock past expiration:
+	sys.clock.Advance(10 * time.Second)
+
+	latestWithExpiry, err := sys.service.TopicMessages(ctx, app.MessageListRequest{
+		Topic:       "demo-latest",
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The expired message "will-expire" must be excluded, so the last 3 are msg-14, msg-15, msg-16-live
+	wantExpiry := []string{"msg-14", "msg-15", "msg-16-live"}
+	if !equalTitles(messageTitles(latestWithExpiry.Items), wantExpiry) {
+		t.Fatalf("latest with expiry = %v, want %v", messageTitles(latestWithExpiry.Items), wantExpiry)
+	}
+
+	// 6. Concurrent appends during backward pagination
+	// While having cursor from latestWithExpiry (which points before msg-14, i.e. msg-13):
+	cursorBefore14 := latestWithExpiry.NextCursor
+	// Concurrent append happens:
+	publish(t, sys, "alice", "demo-latest", "msg-17-concurrent")
+	// The backward pagination continues from cursorBefore14 unaffected:
+	olderPage, err := sys.service.TopicMessages(ctx, app.MessageListRequest{
+		Topic:       "demo-latest",
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 3, Cursor: cursorBefore14},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOlder := []string{"msg-11", "msg-12", "msg-13"}
+	if !equalTitles(messageTitles(olderPage.Items), wantOlder) {
+		t.Fatalf("older page after concurrent append = %v, want %v", messageTitles(olderPage.Items), wantOlder)
+	}
+
+	// 7. Thread latest navigation
+	rootResp, err := sys.service.Publish(ctx, app.PublishRequest{
+		Author: "alice",
+		Topic:  "demo-latest",
+		Title:  "thread-root",
+		Body:   "root body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 8; i++ {
+		_, err := sys.service.Reply(ctx, app.ReplyRequest{
+			Author: alice.Handle,
+			Parent: string(rootResp.ID),
+			Title:  fmt.Sprintf("reply-%02d", i),
+			Body:   fmt.Sprintf("reply body %d", i),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Thread has 9 messages (root + 8 replies). Query latest with limit 4:
+	threadLatest, err := sys.service.Thread(ctx, app.ThreadRequest{
+		Message:     string(rootResp.ID),
+		Latest:      true,
+		PageRequest: app.PageRequest{Limit: 4},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threadLatest.Items) != 4 {
+		t.Fatalf("thread latest items count = %d, want 4", len(threadLatest.Items))
+	}
+	wantThread := []string{"reply-05", "reply-06", "reply-07", "reply-08"}
+	if !equalTitles(messageTitles(threadLatest.Items), wantThread) {
+		t.Fatalf("thread latest = %v, want %v", messageTitles(threadLatest.Items), wantThread)
+	}
+}
+
+func messageTitles(items []domain.Message) []string {
+	out := make([]string, len(items))
+	for i, m := range items {
+		out[i] = m.Title
+	}
+	return out
+}
