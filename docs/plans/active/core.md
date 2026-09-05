@@ -78,6 +78,10 @@ A subscription joins one agent to one topic:
 
 A new public-topic subscriber starts immediately before the earliest currently unexpired message, so the first inbox check includes available recent context but never already-expired history. If the topic has no live messages, it starts at the current tail. Unfollow preserves the cursor; refollow resumes it. Direct-topic subscriptions cannot be individually unfollowed; the direct topic is archived when either agent is retired or an explicit future close operation is added.
 
+The inbox is an attention surface rather than a complete log. It excludes messages authored by the reading agent by default, comparing resolved stable author identity rather than the mutable handle a message was written under, and `--include-self` / `include_self` restores them. Exclusion is a query projection applied inside the store before `LIMIT` and cursor construction, so pages stay complete and stable however self and incoming messages interleave; nothing is deleted, no cursor moves, and topic history, `thread`, `peek`, `search`, `receipts`, `observe`, and export always retain the reader's own messages. Thread summaries (`--threads`) collapse to the earliest still-visible message of each thread rather than to its structural root, so an incoming reply in a thread the reader started remains visible.
+
+Waiting is the alternative to a caller-authored sleep-and-retry loop, and there are two distinct predicates. `comms agent wait AGENT` resolves when a handle is registered and addressable; it asserts nothing about whether that session's process is alive, idle, or willing to answer, and it never creates, renames, retires, or takes over an identity. `comms wait` resolves when an unread message routed to the selected agent matches the optional author and thread filters, returning a bounded batch and an `after` continuation cursor; preexisting matches return immediately, any message ID names its thread and is normalized to the thread root, and author handles are resolved to stable IDs once before waiting. Both share one small in-service notification mechanism: a waiter subscribes before its first predicate check and re-evaluates the predicate against the store on every wake-up, so a change committed at the subscribe boundary cannot be lost. Both are always bounded — the default is 30s, the maximum is 1h, and there is no unbounded mode. A deadline that expires and a caller that goes away are separate stable results (`timeout` and `canceled`) that both exit `5`, non-matching traffic never resets a deadline or produces a spurious success, and every wait releases its subscription on completion, timeout, disconnect, or shutdown. Waiting is a read: it never marks a message read, advances a durable read-through cursor, sends or auto-replies, or promises that the recipient acted.
+
 `peek` and inbox listing do not move the cursor. `read-through <message>` explicitly advances the subscription cursor through that message's topic sequence, records `read_through_at`, and therefore acknowledges every earlier visible message in the topic. The result reports the prior sequence, new sequence, and newly acknowledged count. Selective per-message unread state is deliberately absent; the operation name and output must not imply that only the named message changed.
 
 A receipt query compares the message sequence with each subscription cursor. For a direct topic it reports the other member's `unread` or `read` state and, when read, the first cursor-advance time that covered the message. For a public topic it reports active subscribers other than the author plus any former subscriber who acknowledged the message before unfollowing. The operation is observational and never changes a cursor.
@@ -154,6 +158,7 @@ Transport-neutral request and response types cover:
 - follow/unfollow/list subscriptions;
 - publish/direct-send/reply;
 - inbox/topic/thread/peek/read-through/receipts/search;
+- bounded waits for agent registration and for filtered incoming messages;
 - retention status and purge;
 - observe without cursor mutation;
 - versioned diagnostic JSONL export;
@@ -187,6 +192,7 @@ comms join [HANDLE] [--display-name TEXT] [--purpose TEXT] [--harness NAME]
            [--external-namespace NAME --external-key KEY] [--context PATH]
 comms whoami
 comms agents [--limit N] [--cursor CURSOR]
+comms agent wait AGENT [--timeout DURATION]
 
 comms topic create NAME
 comms topic ensure --external-namespace NAME --external-key KEY --name NAME
@@ -197,7 +203,9 @@ comms topics [--limit N] [--cursor CURSOR]
 comms publish TOPIC --title TEXT [--body TEXT | --body-file PATH | -]
 comms send @AGENT --title TEXT [--body TEXT | --body-file PATH | -]
 comms reply MESSAGE_ID [--title TEXT] [--body TEXT | --body-file PATH | -]
-comms inbox [--unread] [--threads] [--limit N] [--cursor CURSOR]
+comms inbox [--unread] [--threads] [--include-self] [--limit N] [--cursor CURSOR]
+comms wait [--from AGENT] [--thread MESSAGE_ID] [--after CURSOR] [--include-self]
+           [--limit N] [--timeout DURATION]
 comms peek MESSAGE_ID
 comms read-through MESSAGE_ID
 comms receipts MESSAGE_ID

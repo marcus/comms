@@ -27,6 +27,14 @@ import (
 
 const cliSchema = "comms.cli.v1"
 
+// waitTransportSlack keeps the client deadline behind the service's wait
+// deadline so the service, not the transport, reports an expired wait.
+const waitTransportSlack = 5 * time.Second
+
+// defaultCommandTimeout bounds an ordinary command, and caps service readiness
+// work for every command.
+const defaultCommandTimeout = 20 * time.Second
+
 type Env struct {
 	Args        []string
 	Stdin       io.Reader
@@ -45,15 +53,22 @@ type globals struct {
 	as          string
 	socket      string
 	timeout     time.Duration
+	timeoutSet  bool
 	noAutoStart bool
 }
 type runner struct {
-	env       Env
-	g         globals
-	policy    commandPolicy
-	socket    string
-	cmdCtx    context.Context
-	cmdCancel context.CancelFunc
+	env Env
+	g   globals
+	// requestTimeout overrides the global --timeout for the request itself.
+	// Waiting commands set it so their transport deadline outlives the
+	// service-side wait deadline without also extending daemon startup.
+	requestTimeout time.Duration
+	policy         commandPolicy
+	socket         string
+	cmdCtx         context.Context
+	cmdCancel      context.CancelFunc
+	readyCtx       context.Context
+	readyCancel    context.CancelFunc
 }
 
 func Run(env Env) int {
@@ -80,6 +95,9 @@ func Run(env Env) int {
 	defer func() {
 		if r.cmdCancel != nil {
 			r.cmdCancel()
+		}
+		if r.readyCancel != nil {
+			r.readyCancel()
 		}
 	}()
 	if g.help {
@@ -181,6 +199,8 @@ func (r *runner) run(args []string) error {
 		return r.reply(args[1:])
 	case "inbox":
 		return r.inbox(args[1:])
+	case "wait":
+		return r.waitMessages(args[1:])
 	case "peek":
 		return r.oneMessageGet(args[1:], "")
 	case "read-through":
@@ -403,11 +423,20 @@ func (r *runner) listSubscriptions(args []string) error {
 
 func (r *runner) agent(args []string) error {
 	if len(args) < 2 {
-		return usage("usage: comms agent get|update|retire AGENT")
+		return usage("usage: comms agent get|update|retire|wait AGENT")
 	}
 	action, ref := args[0], args[1]
 	path := "/v1/agents/" + url.PathEscape(ref)
 	switch action {
+	case "wait":
+		if len(args) != 2 {
+			return usage("agent wait accepts one agent; bound it with the global --timeout")
+		}
+		bound, err := r.waitBound()
+		if err != nil {
+			return err
+		}
+		return r.get("/v1/agents/"+url.PathEscape(strings.TrimPrefix(ref, "@"))+"/wait", url.Values{"timeout": {bound.String()}}, false)
 	case "get":
 		if len(args) != 2 {
 			return usage("agent get accepts one agent")
@@ -454,7 +483,7 @@ func (r *runner) agent(args []string) error {
 		}
 		return r.mutate(http.MethodPatch, path, body, false)
 	default:
-		return usage("usage: comms agent get|update|retire AGENT")
+		return usage("usage: comms agent get|update|retire|wait AGENT")
 	}
 }
 
@@ -674,6 +703,7 @@ func (r *runner) inbox(args []string) error {
 	fs := newFlagSet("inbox")
 	unread := fs.Bool("unread", false, "")
 	threads := fs.Bool("threads", false, "")
+	includeSelf := fs.Bool("include-self", false, "")
 	limit := fs.Int("limit", 0, "")
 	cursor := fs.String("cursor", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -687,7 +717,52 @@ func (r *runner) inbox(args []string) error {
 	set(q, "cursor", *cursor)
 	setBool(q, "unread", *unread)
 	setBool(q, "threads", *threads)
+	setBool(q, "include_self", *includeSelf)
 	return r.get("/v1/inbox", q, true)
+}
+
+// waitBound reads the wait deadline from the global --timeout and widens the
+// client-side deadline past it, so an expired wait is reported by the service
+// as a timeout instead of being cut off in transit.
+func (r *runner) waitBound() (time.Duration, error) {
+	bound := app.DefaultWaitTimeout
+	if r.g.timeoutSet {
+		bound = r.g.timeout
+	}
+	if bound <= 0 {
+		return 0, usage("waiting commands require a positive --timeout")
+	}
+	if bound > app.MaxWaitTimeout {
+		return 0, usage("--timeout must not exceed " + app.MaxWaitTimeout.String())
+	}
+	r.requestTimeout = bound + waitTransportSlack
+	return bound, nil
+}
+
+func (r *runner) waitMessages(args []string) error {
+	fs := newFlagSet("wait")
+	from := fs.String("from", "", "")
+	thread := fs.String("thread", "", "")
+	after := fs.String("after", "", "")
+	includeSelf := fs.Bool("include-self", false, "")
+	limit := fs.Int("limit", 0, "")
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if fs.NArg() != 0 {
+		return usage("unexpected wait arguments")
+	}
+	bound, err := r.waitBound()
+	if err != nil {
+		return err
+	}
+	q := url.Values{"timeout": {bound.String()}}
+	set(q, "from", strings.TrimPrefix(*from, "@"))
+	set(q, "thread", *thread)
+	set(q, "after", *after)
+	setInt(q, "limit", *limit)
+	setBool(q, "include_self", *includeSelf)
+	return r.get("/v1/wait", q, true)
 }
 func (r *runner) oneMessageGet(args []string, suffix string) error {
 	if len(args) != 1 {
@@ -891,6 +966,9 @@ func renderHuman(w io.Writer, value any) error {
 			if cursor, _ := v["next_cursor"].(string); cursor != "" {
 				_, _ = fmt.Fprintf(w, "next cursor: %s\n", cursor)
 			}
+			if cursor, _ := v["after"].(string); cursor != "" {
+				_, _ = fmt.Fprintf(w, "after cursor: %s\n", cursor)
+			}
 			return nil
 		}
 		if agent, ok := v["agent"].(map[string]any); ok {
@@ -959,7 +1037,7 @@ func renderHuman(w io.Writer, value any) error {
 }
 
 func parseGlobals(args []string) (globals, []string, error) {
-	g := globals{timeout: 20 * time.Second}
+	g := globals{timeout: defaultCommandTimeout}
 	rest := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -994,12 +1072,14 @@ func parseGlobals(args []string) (globals, []string, error) {
 				return g, nil, usage("invalid --timeout")
 			}
 			g.timeout = d
+			g.timeoutSet = true
 		case strings.HasPrefix(arg, "--timeout="):
 			d, e := time.ParseDuration(strings.TrimPrefix(arg, "--timeout="))
 			if e != nil {
 				return g, nil, usage("invalid --timeout")
 			}
 			g.timeout = d
+			g.timeoutSet = true
 		case arg == "--no-auto-start":
 			g.noAutoStart = true
 		default:
@@ -1081,8 +1161,10 @@ func fail(env Env, jsonOutput bool, err error) int {
 		stable := "internal"
 		var re *restartRequiredError
 		switch {
-		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		case errors.Is(err, context.DeadlineExceeded):
 			stable = "timeout"
+		case errors.Is(err, context.Canceled):
+			stable = "canceled"
 		case errors.As(err, &re):
 			stable = re.code
 		case errors.Is(err, httpapi.ErrServerInstanceChanged):
@@ -1117,7 +1199,8 @@ func fail(env Env, jsonOutput bool, err error) int {
 		_, _ = fmt.Fprintf(env.Stderr, "comms: %v\n", err)
 		var se *startupError
 		var re *restartRequiredError
-		if code == 5 && !errors.As(err, &se) && !errors.As(err, &re) {
+		expired := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+		if code == 5 && !expired && !errors.As(err, &se) && !errors.As(err, &re) {
 			_, _ = io.WriteString(env.Stderr, "Start the service with 'comms serve'.\n")
 		}
 	}

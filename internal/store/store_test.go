@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -604,5 +605,695 @@ func TestResolveStatePathReadOnlyDoesNotCreate(t *testing.T) {
 	}
 	if _, e = os.Stat(stateDir); !errors.Is(e, os.ErrNotExist) {
 		t.Fatalf("diagnostic resolution created state directory: %v", e)
+	}
+}
+
+// publish is a focused helper for the inbox-projection and wait tests, which
+// care about authorship and ordering rather than idempotency.
+func publish(t *testing.T, sys *testSystem, author, topic, title string) domain.Message {
+	t.Helper()
+	sys.clock.Advance(time.Millisecond)
+	m, e := sys.service.Publish(context.Background(), app.PublishRequest{Author: author, Topic: topic, Title: title, Body: title})
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m
+}
+func replyTo(t *testing.T, sys *testSystem, author string, parent domain.Message, title string) domain.Message {
+	t.Helper()
+	sys.clock.Advance(time.Millisecond)
+	m, e := sys.service.Reply(context.Background(), app.ReplyRequest{Author: author, Parent: string(parent.ID), Title: title, Body: title})
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m
+}
+func directSend(t *testing.T, sys *testSystem, author, recipient, title string) domain.Message {
+	t.Helper()
+	sys.clock.Advance(time.Millisecond)
+	m, e := sys.service.DirectSend(context.Background(), app.DirectSendRequest{Author: author, Recipient: recipient, Title: title, Body: title})
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m
+}
+func inboxTitles(t *testing.T, sys *testSystem, req app.MessageListRequest) []string {
+	t.Helper()
+	page, e := sys.service.Inbox(context.Background(), req)
+	if e != nil {
+		t.Fatal(e)
+	}
+	titles := make([]string, 0, len(page.Items))
+	for _, m := range page.Items {
+		titles = append(titles, m.Title)
+	}
+	return titles
+}
+func equalTitles(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestInboxExcludesSelfAuthoredMessagesByDefault(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	outbound := directSend(t, sys, "alice", "bob", "alice-direct")
+	answer := replyTo(t, sys, "bob", outbound, "bob-direct-reply")
+	mine := publish(t, sys, "alice", "build", "alice-topic-post")
+	theirs := publish(t, sys, "bob", "build", "bob-topic-post")
+
+	for _, unread := range []bool{false, true} {
+		got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", UnreadOnly: unread})
+		if !equalTitles(got, []string{"bob-topic-post", "bob-direct-reply"}) {
+			t.Fatalf("alice inbox (unread=%v) = %v; want only bob's traffic", unread, got)
+		}
+	}
+	page, e := sys.service.Inbox(ctx, app.MessageListRequest{Agent: "alice"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if page.Items[1].ID != answer.ID || page.Items[1].AuthorID != bob.ID {
+		t.Fatalf("alice inbox second item = %#v; want bob's reply", page.Items[1])
+	}
+
+	// The recipient still sees the incoming direct message.
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "bob"}); !equalTitles(got, []string{"alice-topic-post", "alice-direct"}) {
+		t.Fatalf("bob inbox = %v", got)
+	}
+
+	// The opt-in restores the sender's own messages.
+	got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", IncludeSelf: true})
+	if !equalTitles(got, []string{"bob-topic-post", "alice-topic-post", "bob-direct-reply", "alice-direct"}) {
+		t.Fatalf("alice inbox with IncludeSelf = %v", got)
+	}
+	if theirs.ID == mine.ID {
+		t.Fatal("test fixture is degenerate")
+	}
+
+	// Exclusion is a projection: nothing was deleted and every other surface
+	// still shows the sender's own messages.
+	for name, list := range map[string]func() (app.Page[domain.Message], error){
+		"topic": func() (app.Page[domain.Message], error) {
+			return sys.service.TopicMessages(ctx, app.MessageListRequest{Topic: "build"})
+		},
+		"thread": func() (app.Page[domain.Message], error) {
+			return sys.service.Thread(ctx, app.ThreadRequest{Message: string(outbound.ID)})
+		},
+		"search": func() (app.Page[domain.Message], error) {
+			return sys.service.Search(ctx, app.SearchRequest{Query: "alice-direct"})
+		},
+		"observe": func() (app.Page[domain.Message], error) {
+			return sys.service.Observe(ctx, app.ObserveRequest{})
+		},
+	} {
+		page, e := list()
+		if e != nil {
+			t.Fatalf("%s: %v", name, e)
+		}
+		found := false
+		for _, m := range page.Items {
+			if m.AuthorID == alice.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s dropped alice's own messages: %#v", name, page.Items)
+		}
+	}
+	if _, e := sys.service.Peek(ctx, string(mine.ID)); e != nil {
+		t.Fatalf("peek on own message: %v", e)
+	}
+}
+
+func TestInboxThreadSummariesSurfaceRepliesInSelfStartedThreads(t *testing.T) {
+	sys := newTestSystem(t)
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	mine := publish(t, sys, "alice", "build", "alice-root")
+	reply := replyTo(t, sys, "bob", mine, "bob-reply")
+	theirs := publish(t, sys, "bob", "build", "bob-root")
+	replyTo(t, sys, "bob", theirs, "bob-followup")
+
+	// Alice cannot see her own root, so the summary of her thread becomes the
+	// earliest incoming reply rather than nothing at all.
+	got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", ThreadsOnly: true})
+	if !equalTitles(got, []string{"bob-root", "bob-reply"}) {
+		t.Fatalf("alice thread summaries = %v", got)
+	}
+	page, e := sys.service.Inbox(context.Background(), app.MessageListRequest{Agent: "alice", ThreadsOnly: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if page.Items[1].ID != reply.ID {
+		t.Fatalf("summary of alice's own thread = %s, want reply %s", page.Items[1].ID, reply.ID)
+	}
+	// With her own messages included the summary is the structural root again.
+	got = inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", ThreadsOnly: true, IncludeSelf: true})
+	if !equalTitles(got, []string{"bob-root", "alice-root"}) {
+		t.Fatalf("alice thread summaries with IncludeSelf = %v", got)
+	}
+	// Bob, who wrote the replies, sees only alice's root collapsed.
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "bob", ThreadsOnly: true}); !equalTitles(got, []string{"alice-root"}) {
+		t.Fatalf("bob thread summaries = %v", got)
+	}
+}
+
+func TestInboxSelfExclusionPagesCompletelyAndDoesNotAcknowledge(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	// Surround every incoming message with several self-authored ones so a
+	// naive post-query filter would return short or empty pages.
+	want := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		for j := 0; j < 3; j++ {
+			publish(t, sys, "alice", "build", fmt.Sprintf("alice-%d-%d", i, j))
+		}
+		title := fmt.Sprintf("bob-%d", i)
+		publish(t, sys, "bob", "build", title)
+		want = append([]string{title}, want...)
+	}
+
+	got := []string{}
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("pagination did not terminate")
+		}
+		page, e := sys.service.Inbox(ctx, app.MessageListRequest{PageRequest: app.PageRequest{Limit: 2, Cursor: cursor}, Agent: "alice", UnreadOnly: true})
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(page.Items) > 2 {
+			t.Fatalf("page exceeded limit: %d", len(page.Items))
+		}
+		for _, m := range page.Items {
+			if m.AuthorID == alice.ID {
+				t.Fatalf("self-authored message %q survived paging", m.Title)
+			}
+			got = append(got, m.Title)
+		}
+		cursor = page.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if !equalTitles(got, want) {
+		t.Fatalf("paged inbox = %v, want %v", got, want)
+	}
+
+	// Filtering must not move a cursor or invent acknowledgements.
+	subscriptions, e := sys.service.Subscriptions(ctx, app.SubscriptionListRequest{Agent: "alice"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(subscriptions.Items) != 1 || subscriptions.Items[0].ReadThroughSequence != 0 || subscriptions.Items[0].ReadThroughAt != nil {
+		t.Fatalf("inbox listing advanced a cursor: %#v", subscriptions.Items)
+	}
+	// read-through still acknowledges every earlier visible message in the
+	// topic, including the reader's own.
+	last := publish(t, sys, "bob", "build", "bob-final")
+	read, e := sys.service.ReadThrough(ctx, app.ReadThroughRequest{Agent: "alice", Message: string(last.ID)})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if read.NewlyAcknowledged != 25 {
+		t.Fatalf("read-through acknowledged %d, want every visible message", read.NewlyAcknowledged)
+	}
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", UnreadOnly: true}); len(got) != 0 {
+		t.Fatalf("unread after read-through = %v", got)
+	}
+	_ = bob
+}
+
+func TestInboxSelfExclusionComparesIdentityNotHandle(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+	publish(t, sys, "alice", "build", "before-rename")
+	publish(t, sys, "bob", "build", "incoming")
+
+	renamed := "alice-two"
+	if _, e := sys.service.UpdateAgent(ctx, app.UpdateAgentRequest{Agent: string(alice.ID), Handle: &renamed}); e != nil {
+		t.Fatal(e)
+	}
+	// The message was written under the old handle; identity is what matters.
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: renamed}); !equalTitles(got, []string{"incoming"}) {
+		t.Fatalf("inbox after rename = %v", got)
+	}
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: string(alice.ID), IncludeSelf: true}); len(got) != 2 {
+		t.Fatalf("inbox after rename with IncludeSelf = %v", got)
+	}
+}
+
+func TestInboxSelfExclusionRespectsExpiryAndRouting(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	carol := join(t, sys.service, "carol", nil)
+	topic := createTopic(t, sys.service, "build")
+	for _, agent := range []domain.Agent{alice, bob, carol} {
+		follow(t, sys.service, agent, topic)
+	}
+	sys.clock.Advance(time.Millisecond)
+	fleeting, e := sys.service.Publish(ctx, app.PublishRequest{Author: "bob", Topic: "build", Title: "fleeting", Body: "x", Expiry: app.Expiry{After: time.Minute}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	publish(t, sys, "bob", "build", "durable")
+	directSend(t, sys, "bob", "carol", "unrelated-direct")
+
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice"}); !equalTitles(got, []string{"durable", "fleeting"}) {
+		t.Fatalf("alice inbox = %v", got)
+	}
+	sys.clock.Advance(2 * time.Minute)
+	got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice"})
+	if !equalTitles(got, []string{"durable"}) {
+		t.Fatalf("alice inbox after expiry = %v", got)
+	}
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", IncludeSelf: true}); !equalTitles(got, []string{"durable"}) {
+		t.Fatalf("IncludeSelf must not resurrect expired messages: %v", got)
+	}
+	// A direct topic alice does not belong to stays out of her inbox either way.
+	for _, includeSelf := range []bool{false, true} {
+		for _, title := range inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", IncludeSelf: includeSelf}) {
+			if title == "unrelated-direct" {
+				t.Fatal("unrelated direct traffic leaked into the inbox")
+			}
+		}
+	}
+	_ = fleeting
+}
+
+func waitTitles(t *testing.T, result app.MessageWaitResponse) []string {
+	t.Helper()
+	titles := make([]string, 0, len(result.Items))
+	for _, m := range result.Items {
+		titles = append(titles, m.Title)
+	}
+	return titles
+}
+
+func TestWaitForMessagesFiltersAndReturnsPreexistingMatchesImmediately(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	carol := join(t, sys.service, "carol", nil)
+	topic := createTopic(t, sys.service, "build")
+	for _, agent := range []domain.Agent{alice, bob, carol} {
+		follow(t, sys.service, agent, topic)
+	}
+	mine := publish(t, sys, "alice", "build", "alice-root")
+	bobReply := replyTo(t, sys, "bob", mine, "bob-reply")
+	carolReply := replyTo(t, sys, "carol", mine, "carol-reply")
+	carolElsewhere := publish(t, sys, "carol", "build", "carol-root")
+
+	short := 100 * time.Millisecond
+	cases := []struct {
+		name string
+		req  app.MessageWaitRequest
+		want []string
+	}{
+		{"no filter", app.MessageWaitRequest{Agent: "alice"}, []string{"bob-reply", "carol-reply", "carol-root"}},
+		{"author only", app.MessageWaitRequest{Agent: "alice", From: "carol"}, []string{"carol-reply", "carol-root"}},
+		{"thread only", app.MessageWaitRequest{Agent: "alice", Thread: string(mine.ID)}, []string{"bob-reply", "carol-reply"}},
+		{"author and thread", app.MessageWaitRequest{Agent: "alice", From: "carol", Thread: string(mine.ID)}, []string{"carol-reply"}},
+		{"thread named by a reply", app.MessageWaitRequest{Agent: "alice", Thread: string(bobReply.ID)}, []string{"bob-reply", "carol-reply"}},
+		{"author by stable id", app.MessageWaitRequest{Agent: "alice", From: string(bob.ID)}, []string{"bob-reply"}},
+		{"bounded batch", app.MessageWaitRequest{Agent: "alice", Limit: 1}, []string{"bob-reply"}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			testCase.req.Timeout = short
+			result, e := sys.service.WaitForMessages(ctx, testCase.req)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if got := waitTitles(t, result); !equalTitles(got, testCase.want) {
+				t.Fatalf("wait = %v, want %v", got, testCase.want)
+			}
+			if result.Filter.AgentID != alice.ID {
+				t.Fatalf("resolved filter = %#v", result.Filter)
+			}
+		})
+	}
+	// Own messages never satisfy a wait unless asked for.
+	if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", From: "alice", Timeout: short}); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("waiting on own author = %v, want timeout", e)
+	}
+	result, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", From: "alice", IncludeSelf: true, Timeout: short})
+	if e != nil || !equalTitles(waitTitles(t, result), []string{"alice-root"}) {
+		t.Fatalf("IncludeSelf wait = %#v %v", result, e)
+	}
+	// Traffic that does not match must not satisfy or reset the wait.
+	if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", From: "bob", Thread: string(carolElsewhere.ID), Timeout: short}); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("non-matching intersection = %v, want timeout", e)
+	}
+	// Missing filter targets fail fast rather than waiting.
+	for name, req := range map[string]app.MessageWaitRequest{
+		"missing author": {Agent: "alice", From: "nobody", Timeout: time.Minute},
+		"missing thread": {Agent: "alice", Thread: "msg_absent", Timeout: time.Minute},
+		"missing agent":  {Agent: "nobody", Timeout: time.Minute},
+	} {
+		if _, e := sys.service.WaitForMessages(ctx, req); !errors.Is(e, app.ErrNotFound) {
+			t.Fatalf("%s = %v, want not found", name, e)
+		}
+	}
+	if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", Timeout: -time.Second}); !errors.Is(e, domain.ErrInvalid) {
+		t.Fatalf("negative timeout = %v", e)
+	}
+	if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", Timeout: 2 * app.MaxWaitTimeout}); !errors.Is(e, domain.ErrInvalid) {
+		t.Fatalf("unbounded timeout = %v", e)
+	}
+	_ = carolReply
+}
+
+func TestWaitForMessagesResumesFromCursorWithoutAcknowledging(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	publish(t, sys, "bob", "build", "one")
+	first, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", Limit: 1, Timeout: time.Second})
+	if e != nil || !equalTitles(waitTitles(t, first), []string{"one"}) {
+		t.Fatalf("first wait = %#v %v", first, e)
+	}
+	if first.After == "" {
+		t.Fatal("first wait returned no continuation cursor")
+	}
+
+	// A waiter started before the reply resolves on the arrival, exactly once,
+	// with no outer polling loop.
+	results := make(chan app.MessageWaitResponse, 1)
+	failures := make(chan error, 1)
+	go func() {
+		result, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", After: first.After, Timeout: 5 * time.Second})
+		if e != nil {
+			failures <- e
+			return
+		}
+		results <- result
+	}()
+	time.Sleep(20 * time.Millisecond)
+	publish(t, sys, "bob", "build", "two")
+	select {
+	case e := <-failures:
+		t.Fatal(e)
+	case second := <-results:
+		if !equalTitles(waitTitles(t, second), []string{"two"}) {
+			t.Fatalf("resumed wait = %v; the cursor must not replay %q", waitTitles(t, second), "one")
+		}
+		if second.After == first.After {
+			t.Fatal("continuation cursor did not advance")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not observe the arrival")
+	}
+
+	// Waiting is a read. No cursor moved and no receipt appeared.
+	subscriptions, e := sys.service.Subscriptions(ctx, app.SubscriptionListRequest{Agent: "alice"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if subscriptions.Items[0].ReadThroughSequence != 0 || subscriptions.Items[0].ReadThroughAt != nil {
+		t.Fatalf("waiting advanced a read cursor: %#v", subscriptions.Items[0])
+	}
+	if got := inboxTitles(t, sys, app.MessageListRequest{Agent: "alice", UnreadOnly: true}); !equalTitles(got, []string{"two", "one"}) {
+		t.Fatalf("unread after waiting = %v", got)
+	}
+}
+
+func TestWaitForMessagesCannotMissAnArrivalAtTheSubscribeBoundary(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	cursor := ""
+	for round := 0; round < 25; round++ {
+		start := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			<-start
+			_, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", After: cursor, Timeout: 5 * time.Second})
+			done <- e
+		}()
+		close(start)
+		published := publish(t, sys, "bob", "build", fmt.Sprintf("round-%d", round))
+		select {
+		case e := <-done:
+			if e != nil {
+				t.Fatalf("round %d: publish raced the waiter into a %v", round, e)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: waiter missed an arrival committed at the subscribe boundary", round)
+		}
+		cursor = encodeCursor(strconv.FormatInt(micros(published.CreatedAt), 10), string(published.ID))
+	}
+}
+
+func TestConcurrentWaitersAllResolveAndReleaseTheirSubscriptions(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+
+	const waiters = 8
+	var group sync.WaitGroup
+	failures := make(chan error, waiters)
+	for i := 0; i < waiters; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", Timeout: 5 * time.Second}); e != nil {
+				failures <- e
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	publish(t, sys, "bob", "build", "broadcast")
+	group.Wait()
+	close(failures)
+	for e := range failures {
+		t.Fatalf("concurrent waiter: %v", e)
+	}
+
+	// A timed-out wait and a cancelled wait must also release their slot.
+	if _, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", From: "alice", Timeout: 50 * time.Millisecond}); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("timed-out wait = %v", e)
+	}
+	cancellable, cancel := context.WithCancel(ctx)
+	cancelled := make(chan error, 1)
+	go func() {
+		_, e := sys.service.WaitForMessages(cancellable, app.MessageWaitRequest{Agent: "alice", From: "alice", Timeout: time.Minute})
+		cancelled <- e
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case e := <-cancelled:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatalf("cancelled wait = %v, want cancellation distinguishable from timeout", e)
+		}
+		if errors.Is(e, context.DeadlineExceeded) {
+			t.Fatal("cancellation reported as a deadline")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled wait did not return promptly")
+	}
+	if got := sys.service.MessageEvents().(*app.Notifier).Subscribers(); got != 0 {
+		t.Fatalf("%d wait subscriptions leaked", got)
+	}
+}
+
+func TestWaitForAgentResolvesJoinsAndBoundsMissingHandles(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	existing := join(t, sys.service, "alice", nil)
+
+	// An already registered handle returns promptly.
+	got, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "alice", Timeout: time.Minute})
+	if e != nil || got.ID != existing.ID {
+		t.Fatalf("registered wait = %#v %v", got, e)
+	}
+
+	// A waiter started before the join returns the exact stable ID, with no
+	// repeated lookups by the caller.
+	joined := make(chan domain.Agent, 1)
+	failures := make(chan error, 1)
+	go func() {
+		agent, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "publisher", Timeout: 5 * time.Second})
+		if e != nil {
+			failures <- e
+			return
+		}
+		joined <- agent
+	}()
+	time.Sleep(20 * time.Millisecond)
+	fresh := join(t, sys.service, "publisher", nil)
+	select {
+	case e := <-failures:
+		t.Fatal(e)
+	case agent := <-joined:
+		if agent.ID != fresh.ID {
+			t.Fatalf("waiter returned %s, want the joined agent %s", agent.ID, fresh.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not observe the join")
+	}
+
+	// A missing handle ends at its bound, and a cancelled wait is distinct.
+	start := time.Now()
+	if _, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "absent", Timeout: 100 * time.Millisecond}); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("missing handle = %v, want timeout", e)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("wait overran its bound by %s", elapsed)
+	}
+	cancellable, cancel := context.WithCancel(ctx)
+	cancelled := make(chan error, 1)
+	go func() {
+		_, e := sys.service.WaitForAgent(cancellable, app.AgentWaitRequest{Agent: "absent", Timeout: time.Minute})
+		cancelled <- e
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case e := <-cancelled:
+		if !errors.Is(e, context.Canceled) || errors.Is(e, context.DeadlineExceeded) {
+			t.Fatalf("cancelled agent wait = %v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled agent wait did not return promptly")
+	}
+
+	// Waiting creates nothing and takes nothing over.
+	agents, e := sys.service.Agents(ctx, app.AgentListRequest{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(agents.Items) != 2 {
+		t.Fatalf("waiting mutated the agent roster: %#v", agents.Items)
+	}
+	if got := sys.service.AgentEvents().(*app.Notifier).Subscribers(); got != 0 {
+		t.Fatalf("%d agent wait subscriptions leaked", got)
+	}
+}
+
+func TestWaitForAgentRefusesRetiredHandlesAndFollowsRenames(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	retiring := join(t, sys.service, "retiring", nil)
+	if _, e := sys.service.RetireAgent(ctx, app.RetireAgentRequest{Agent: string(retiring.ID)}); e != nil {
+		t.Fatal(e)
+	}
+	// A retired handle stays taken, so this is a conflict rather than a wait
+	// that can only ever expire.
+	if _, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "retiring", Timeout: time.Minute}); !errors.Is(e, app.ErrConflict) {
+		t.Fatalf("retired handle = %v, want conflict", e)
+	}
+
+	// A rename that makes the awaited handle resolve also wakes a waiter.
+	mover := join(t, sys.service, "mover", nil)
+	resolved := make(chan domain.Agent, 1)
+	failures := make(chan error, 1)
+	go func() {
+		agent, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "arrived", Timeout: 5 * time.Second})
+		if e != nil {
+			failures <- e
+			return
+		}
+		resolved <- agent
+	}()
+	time.Sleep(20 * time.Millisecond)
+	renamed := "arrived"
+	if _, e := sys.service.UpdateAgent(ctx, app.UpdateAgentRequest{Agent: string(mover.ID), Handle: &renamed}); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case e := <-failures:
+		t.Fatal(e)
+	case agent := <-resolved:
+		if agent.ID != mover.ID {
+			t.Fatalf("rename waiter returned %s, want %s", agent.ID, mover.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rename did not wake the waiter")
+	}
+	if _, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "  ", Timeout: time.Minute}); !errors.Is(e, domain.ErrInvalid) {
+		t.Fatalf("blank reference = %v", e)
+	}
+}
+
+// Following a topic that already holds unread messages routes them to the
+// agent, which satisfies a wait that is already blocked on that predicate.
+func TestFollowingATopicWakesABlockedWaiter(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, bob, topic)
+	publish(t, sys, "bob", "build", "already-here")
+
+	waited := make(chan app.MessageWaitResponse, 1)
+	failures := make(chan error, 1)
+	go func() {
+		result, e := sys.service.WaitForMessages(ctx, app.MessageWaitRequest{Agent: "alice", Timeout: 5 * time.Second})
+		if e != nil {
+			failures <- e
+			return
+		}
+		waited <- result
+	}()
+	time.Sleep(50 * time.Millisecond)
+	follow(t, sys.service, alice, topic)
+	select {
+	case e := <-failures:
+		t.Fatalf("waiter slept through a subscription that satisfied it: %v", e)
+	case result := <-waited:
+		if !equalTitles(waitTitles(t, result), []string{"already-here"}) {
+			t.Fatalf("wait after follow = %v", waitTitles(t, result))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("following a topic with unread messages did not wake the waiter")
 	}
 }

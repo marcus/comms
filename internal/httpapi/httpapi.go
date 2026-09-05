@@ -102,6 +102,7 @@ func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
 	mux.HandleFunc("PATCH /v1/agents/{agent}", h.updateAgent)
 	mux.HandleFunc("POST /v1/agents/{agent}/retire", h.retireAgent)
 	mux.HandleFunc("GET /v1/agents", h.agents)
+	mux.HandleFunc("GET /v1/agents/{agent}/wait", h.waitAgent)
 	mux.HandleFunc("POST /v1/topics", h.createTopic)
 	mux.HandleFunc("PUT /v1/topics/by-external-reference", h.ensureTopic)
 	mux.HandleFunc("PATCH /v1/topics/{topic}", h.updateTopic)
@@ -114,6 +115,7 @@ func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
 	mux.HandleFunc("POST /v1/direct-messages", h.directSend)
 	mux.HandleFunc("POST /v1/messages/{message}/replies", h.reply)
 	mux.HandleFunc("GET /v1/inbox", h.inbox)
+	mux.HandleFunc("GET /v1/wait", h.waitMessages)
 	mux.HandleFunc("GET /v1/topics/{topic}/messages", h.topicMessages)
 	mux.HandleFunc("GET /v1/messages/{message}/thread", h.thread)
 	mux.HandleFunc("GET /v1/messages/{message}", h.peek)
@@ -525,7 +527,43 @@ func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads")})
+	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self")})
+	h.respond(w, v, e)
+}
+func (h *Handler) waitAgent(w http.ResponseWriter, r *http.Request) {
+	timeout, e := durationQuery(r, "timeout")
+	if e != nil {
+		h.respond(w, nil, e)
+		return
+	}
+	v, e := h.app.WaitForAgent(r.Context(), app.AgentWaitRequest{Agent: r.PathValue("agent"), Timeout: timeout})
+	h.respond(w, v, e)
+}
+func (h *Handler) waitMessages(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	timeout, e := durationQuery(r, "timeout")
+	if e != nil {
+		h.respond(w, nil, e)
+		return
+	}
+	p, e := page(r)
+	if e != nil {
+		h.respond(w, nil, e)
+		return
+	}
+	query := r.URL.Query()
+	v, e := h.app.WaitForMessages(r.Context(), app.MessageWaitRequest{
+		Agent:       agent,
+		From:        query.Get("from"),
+		Thread:      query.Get("thread"),
+		After:       query.Get("after"),
+		Limit:       p.Limit,
+		IncludeSelf: boolQuery(r, "include_self"),
+		Timeout:     timeout,
+	})
 	h.respond(w, v, e)
 }
 func (h *Handler) topicMessages(w http.ResponseWriter, r *http.Request) {
@@ -717,8 +755,10 @@ func classify(err error) (int, string) {
 		return http.StatusConflict, "server_instance_changed"
 	case errors.Is(err, app.ErrConflict):
 		return http.StatusConflict, "conflict"
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, "timeout"
+	case errors.Is(err, context.Canceled):
+		return http.StatusServiceUnavailable, "canceled"
 	case errors.Is(err, app.ErrUnavailable), errors.Is(err, app.ErrOverloaded), errors.Is(err, app.ErrClosed):
 		return http.StatusServiceUnavailable, "unavailable"
 	default:
@@ -735,6 +775,17 @@ func page(r *http.Request) (app.PageRequest, error) {
 		p.Limit = n
 	}
 	return p, nil
+}
+func durationQuery(r *http.Request, name string) (time.Duration, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s must be a duration such as 30s", domain.ErrInvalid, name)
+	}
+	return value, nil
 }
 func boolQuery(r *http.Request, name string) bool {
 	v, _ := strconv.ParseBool(r.URL.Query().Get(name))
@@ -794,17 +845,19 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 		}
 		switch envelope.Error.Code {
 		case "invalid_argument":
-			return fmt.Errorf("%w: %s", domain.ErrInvalid, envelope.Error.Message)
+			return remote(domain.ErrInvalid, envelope.Error.Message)
 		case "not_found":
-			return fmt.Errorf("%w: %s", app.ErrNotFound, envelope.Error.Message)
+			return remote(app.ErrNotFound, envelope.Error.Message)
 		case "server_instance_changed":
-			return fmt.Errorf("%w: %s", ErrServerInstanceChanged, envelope.Error.Message)
+			return remote(ErrServerInstanceChanged, envelope.Error.Message)
 		case "conflict":
-			return fmt.Errorf("%w: %s", app.ErrConflict, envelope.Error.Message)
+			return remote(app.ErrConflict, envelope.Error.Message)
 		case "timeout":
-			return fmt.Errorf("%w: %s", context.DeadlineExceeded, envelope.Error.Message)
+			return remote(context.DeadlineExceeded, envelope.Error.Message)
+		case "canceled":
+			return remote(context.Canceled, envelope.Error.Message)
 		case "unavailable":
-			return fmt.Errorf("%w: %s", app.ErrUnavailable, envelope.Error.Message)
+			return remote(app.ErrUnavailable, envelope.Error.Message)
 		default:
 			return errors.New(envelope.Error.Message)
 		}
@@ -846,6 +899,25 @@ func (c *Client) Export(ctx context.Context, w io.Writer) error {
 	}
 	_, e = io.Copy(w, resp.Body)
 	return e
+}
+
+// remoteError carries a service error across the transport: it classifies as
+// the sentinel the stable code names while reporting the service's own
+// message. Wrapping with a %w prefix instead would repeat the sentinel text
+// the service already put in that message.
+type remoteError struct {
+	sentinel error
+	message  string
+}
+
+func (e *remoteError) Error() string { return e.message }
+func (e *remoteError) Unwrap() error { return e.sentinel }
+
+func remote(sentinel error, message string) error {
+	if message == "" {
+		return sentinel
+	}
+	return &remoteError{sentinel: sentinel, message: message}
 }
 
 func wrapClientError(err error) error {

@@ -12,7 +12,8 @@ Independent agent sessions—running in Claude Code, Codex, Gemini CLI, IDE exte
 - **Local-First & Fast:** Backed by SQLite in WAL mode with a local Unix domain socket HTTP API, providing sub-millisecond local messaging.
 - **Short-Lived by Design:** Messages expire automatically after 7 days by default, keeping storage lean and focusing on active work rather than permanent history.
 - **Topics, Threads, & Direct Messages:** Broadcast on public topics or send direct messages; follow conversations with threaded replies.
-- **Read Cursors & Receipts:** Each session tracks its own unread messages using explicit cursors. Senders can inspect who has acknowledged a message without altering read states.
+- **Read Cursors & Receipts:** Each session tracks its own unread messages using explicit cursors. Senders can inspect who has acknowledged a message without altering read states. Your own messages stay out of your inbox by default, so it reads as incoming work.
+- **Waiting Instead of Polling:** `comms agent wait` blocks until a session registers, and `comms wait` blocks until a matching reply arrives. Both are bounded, filterable, and never acknowledge anything, so agents coordinate without sleep-and-retry loops.
 - **Operator-Visible:** Humans can observe all traffic (including direct messages) with `comms observe` without advancing any agent's read cursor.
 - **Zero Cgo, Single Binary:** Builds with `CGO_ENABLED=0` for macOS and Linux on amd64 and arm64.
 
@@ -60,10 +61,16 @@ COMMS_CONTEXT=/tmp/alice.json comms publish dev-sync \
 # 4. Bob checks unread messages
 COMMS_CONTEXT=/tmp/bob.json comms inbox --unread
 
-# 5. Bob marks messages read through Alice's message
+# 5. Coordinate without polling: wait for a session to register, brief it,
+#    then wait for its answer on that thread.
+comms --timeout 30s agent wait @bob
+COMMS_CONTEXT=/tmp/alice.json comms send @bob --title "Briefing" --body "Start with td-123abc."
+COMMS_CONTEXT=/tmp/alice.json comms --timeout 2m wait --from @bob
+
+# 6. Bob marks messages read through Alice's message
 COMMS_CONTEXT=/tmp/bob.json comms read-through <MESSAGE_ID>
 
-# 6. Bob sends a direct message to Alice
+# 7. Bob sends a direct message to Alice
 COMMS_CONTEXT=/tmp/bob.json comms send @alice \
   --title "Running tests" \
   --body "I'll review td-123abc now."
@@ -109,6 +116,7 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms agent get AGENT`: Inspect details of a specific agent.
 - `comms agent update AGENT`: Update display name, purpose, or session metadata.
 - `comms agent retire AGENT`: Retire a session endpoint.
+- `comms agent wait AGENT`: Block until a handle is registered and addressable, bounded by the global `--timeout` (default 30s). Useful before messaging a session that is still starting up.
 
 ### Topics & Subscriptions
 - `comms topic create NAME [--description TEXT]`: Create a public topic.
@@ -122,7 +130,8 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms publish TOPIC --title TEXT [--body TEXT | --body-file PATH | -]`: Publish to a topic.
 - `comms send @AGENT --title TEXT [--body TEXT | --body-file PATH | -]`: Direct message an agent.
 - `comms reply MESSAGE_ID [--title TEXT] [--body TEXT | --body-file PATH | -]`: Reply to a message in-thread.
-- `comms inbox [--unread] [--threads]`: View received messages.
+- `comms inbox [--unread] [--threads] [--include-self]`: View received messages. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
+- `comms wait [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Returns any preexisting matches immediately and an `after` cursor to resume from, so agents never sleep-and-poll.
 - `comms peek MESSAGE_ID`: View a single message without advancing read cursors.
 - `comms read-through MESSAGE_ID`: Acknowledge messages up through a specific sequence.
 - `comms receipts MESSAGE_ID`: Check subscriber read acknowledgments.

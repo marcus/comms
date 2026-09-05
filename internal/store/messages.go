@@ -223,7 +223,12 @@ func pageMessages(ctx context.Context, db *sql.DB, query string, args []any, lim
 	}
 	return out, nil
 }
-func descendingCursor(v string) (int64, string, error) {
+
+// pairCursor decodes the shared opaque (position, id) continuation encoding.
+// The position is a created_at stamp for time-ordered pages and a topic
+// sequence for sequence-ordered pages; either way an empty cursor means start
+// at the beginning and is reported as position 0.
+func pairCursor(v string) (int64, string, error) {
 	p, e := decodeCursor(v, 2)
 	if e != nil {
 		return 0, "", e
@@ -237,7 +242,20 @@ func descendingCursor(v string) (int64, string, error) {
 	}
 	return n, p[1], nil
 }
-func ascendingCursor(v string) (int64, string, error) { return descendingCursor(v) }
+func descendingCursor(v string) (int64, string, error) { return pairCursor(v) }
+func ascendingCursor(v string) (int64, string, error)  { return pairCursor(v) }
+
+// inboxVisible is the per-message inbox predicate: unexpired, optionally
+// unread, and by default not written by the reader. It is applied inside the
+// SQL statement, before LIMIT and cursor construction, so excluded messages
+// never consume a page slot and pagination stays complete and stable.
+func inboxVisible(alias string) string {
+	return "(" + alias + ".expires_at IS NULL OR " + alias + ".expires_at>?) AND (?=0 OR " + alias + ".sequence>s.read_through_sequence) AND (?=1 OR " + alias + ".author_id<>?)"
+}
+
+func inboxVisibleArgs(req app.MessageListRequest, agent domain.AgentID, now time.Time) []any {
+	return []any{micros(now), req.UnreadOnly, req.IncludeSelf, agent}
+}
 
 func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now time.Time) (app.Page[domain.Message], error) {
 	ag, e := resolveAgent(ctx, a.read, req.Agent, now)
@@ -248,8 +266,82 @@ func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now tim
 	if e != nil {
 		return app.Page[domain.Message]{}, e
 	}
-	query := "SELECT " + prefixedMessageCols("m") + " FROM messages m JOIN subscriptions s ON s.topic_id=m.topic_id AND s.agent_id=? AND s.unfollowed_at IS NULL WHERE (m.expires_at IS NULL OR m.expires_at>?) AND (?=0 OR m.sequence>s.read_through_sequence) AND (?=0 OR m.in_reply_to IS NULL) AND (?=0 OR m.created_at<? OR (m.created_at=? AND m.id<?)) ORDER BY m.created_at DESC,m.id DESC LIMIT ?"
-	return pageMessages(ctx, a.read, query, []any{ag.ID, micros(now), req.UnreadOnly, req.ThreadsOnly, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
+	// Thread summaries collapse to the earliest still-visible message of each
+	// thread rather than to its structural root. When the reader started the
+	// thread, its root is not visible to them and an incoming reply becomes
+	// the summary, so replies in self-started threads never disappear.
+	query := "SELECT " + prefixedMessageCols("m") +
+		" FROM messages m JOIN subscriptions s ON s.topic_id=m.topic_id AND s.agent_id=? AND s.unfollowed_at IS NULL" +
+		" WHERE " + inboxVisible("m") +
+		" AND (?=0 OR m.sequence=(SELECT MIN(x.sequence) FROM messages x WHERE x.thread_root_id=m.thread_root_id AND " + inboxVisible("x") + "))" +
+		" AND (?=0 OR m.created_at<? OR (m.created_at=? AND m.id<?))" +
+		" ORDER BY m.created_at DESC,m.id DESC LIMIT ?"
+	args := []any{ag.ID}
+	args = append(args, inboxVisibleArgs(req, ag.ID, now)...)
+	args = append(args, req.ThreadsOnly)
+	args = append(args, inboxVisibleArgs(req, ag.ID, now)...)
+	args = append(args, stamp, stamp, stamp, id, req.Limit+1)
+	return pageMessages(ctx, a.read, query, args, req.Limit, true)
+}
+
+func (a *Adapter) ResolveWait(ctx context.Context, req app.MessageWaitRequest, now time.Time) (app.ResolvedWait, error) {
+	ag, e := resolveAgent(ctx, a.read, req.Agent, now)
+	if e != nil {
+		return app.ResolvedWait{}, e
+	}
+	out := app.ResolvedWait{AgentID: ag.ID}
+	if req.From != "" {
+		from, e := resolveAgent(ctx, a.read, req.From, now)
+		if e != nil {
+			return app.ResolvedWait{}, e
+		}
+		out.FromID = from.ID
+	}
+	if req.Thread != "" {
+		// Any message in a thread names the thread; normalize to its root so a
+		// caller can wait on a reply ID without knowing which one started it.
+		m, e := resolveMessage(ctx, a.read, req.Thread)
+		if e != nil {
+			return app.ResolvedWait{}, e
+		}
+		out.ThreadRootID = m.ThreadRootID
+	}
+	return out, nil
+}
+
+func (a *Adapter) MatchingMessages(ctx context.Context, req app.MessageWaitRequest, resolved app.ResolvedWait, now time.Time) (app.MessageWaitResponse, error) {
+	stamp, id, e := pairCursor(req.After)
+	if e != nil {
+		return app.MessageWaitResponse{}, e
+	}
+	query := "SELECT " + prefixedMessageCols("m") +
+		" FROM messages m JOIN subscriptions s ON s.topic_id=m.topic_id AND s.agent_id=? AND s.unfollowed_at IS NULL" +
+		" WHERE (m.expires_at IS NULL OR m.expires_at>?) AND m.sequence>s.read_through_sequence" +
+		" AND (?=1 OR m.author_id<>?) AND (?='' OR m.author_id=?) AND (?='' OR m.thread_root_id=?)" +
+		" AND (?=0 OR m.created_at>? OR (m.created_at=? AND m.id>?))" +
+		" ORDER BY m.created_at,m.id LIMIT ?"
+	args := []any{resolved.AgentID, micros(now), req.IncludeSelf, resolved.AgentID, resolved.FromID, resolved.FromID, resolved.ThreadRootID, resolved.ThreadRootID, stamp, stamp, stamp, id, req.Limit}
+	rows, e := a.read.QueryContext(ctx, query, args...)
+	if e != nil {
+		return app.MessageWaitResponse{}, e
+	}
+	defer func() { _ = rows.Close() }()
+	out := app.MessageWaitResponse{Items: []domain.Message{}, After: req.After}
+	for rows.Next() {
+		m, e := scanMessage(rows)
+		if e != nil {
+			return app.MessageWaitResponse{}, e
+		}
+		out.Items = append(out.Items, m)
+	}
+	if e = rows.Err(); e != nil {
+		return app.MessageWaitResponse{}, e
+	}
+	if len(out.Items) != 0 {
+		last := out.Items[len(out.Items)-1]
+		out.After = encodeCursor(strconv.FormatInt(micros(last.CreatedAt), 10), string(last.ID))
+	}
+	return out, nil
 }
 func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest, now time.Time) (app.Page[domain.Message], error) {
 	t, e := resolveTopic(ctx, a.read, req.Topic)

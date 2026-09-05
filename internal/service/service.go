@@ -77,7 +77,17 @@ func Run(ctx context.Context, cfg Config) error {
 	} else {
 		handler = httpapi.NewUnixHandler(application, life)
 	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	// Long-polling wait handlers block until their predicate, deadline, or
+	// request context ends. Serving them from a server-lifetime context lets
+	// shutdown cancel them instead of waiting out the shutdown budget while
+	// the store closes underneath them.
+	serving, stopServing := context.WithCancel(context.Background())
+	defer stopServing()
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return serving },
+	}
 	listener, cleanup, err := listen(cfg)
 	if err != nil {
 		return err
@@ -101,6 +111,7 @@ func Run(ctx context.Context, cfg Config) error {
 	case <-ctx.Done():
 	case <-life.Done():
 	}
+	stopServing()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	shutdownErr := server.Shutdown(shutdownContext)

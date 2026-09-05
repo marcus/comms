@@ -113,7 +113,9 @@ func AgentInstructions() Instructions {
 		Purpose: "Exchange short-lived messages and pointers among independent local agent sessions.",
 		Guarantees: []string{
 			"A successful publish has been accepted into the authoritative store.",
-			"Inbox, peek, thread, search, receipts, and observe do not advance read cursors.",
+			"Inbox, peek, thread, search, receipts, observe, and both wait operations do not advance read cursors.",
+			"The inbox excludes your own messages by default so it shows incoming work; --include-self restores them, and every other surface always retains them.",
+			"Waiting is bounded: it returns a match, times out, or reports cancellation, and never blocks forever.",
 			"Read-through advances one topic cursor through the named message and acknowledges all earlier visible sequences.",
 			"Stable record IDs do not change when friendly handles or topic names change.",
 			"Structured responses, error codes, and cursor meanings follow versioned compatibility contracts.",
@@ -121,6 +123,7 @@ func AgentInstructions() Instructions {
 		Boundaries: []string{
 			"Comms carries transient coordination; durable tasks, decisions, artifacts, and secrets belong in their owning systems.",
 			"Delivery does not prove that a session is alive, noticed a message, understood it, or acted on it.",
+			"A resolved agent wait proves only that a handle is registered and addressable, not that its process is running, idle, or willing to answer.",
 			"Direct topics control routing and ordinary discovery, not trusted-local read access.",
 			"Comms does not spawn agents, assign work, execute messages, or replace project documentation and task trackers.",
 		},
@@ -128,6 +131,8 @@ func AgentInstructions() Instructions {
 			"comms join build-agent --harness codex --context ./comms-context.json",
 			"printf '%s\\n' 'Review notes are in td-123abc.' | comms publish project-alpha --title 'Review ready' -",
 			"comms inbox --unread --json",
+			"comms --timeout 30s agent wait @publisher --json && comms send @publisher --title 'Briefing' --body 'Start with td-123abc.'",
+			"comms --timeout 2m wait --from @publisher --thread msg_example --json",
 			"comms read-through msg_example --json",
 		},
 		Commands: commands,

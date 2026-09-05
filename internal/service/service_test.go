@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -293,5 +294,52 @@ func TestShutdownDrainsInFlightAndQueuedWrites(t *testing.T) {
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A long-polling wait must not hold shutdown open for the whole shutdown
+// budget, block the CLI's stop/restart and auto-daemon replacement paths, or
+// make the process exit with an error.
+func TestShutdownCancelsInFlightWaits(t *testing.T) {
+	server := startTestServer(t, Config{})
+	agent := struct {
+		Handle string `json:"handle"`
+	}{Handle: "waiter"}
+	status, body := unixJSON(t, server.socket, http.MethodPost, "/v1/agents/join", agent)
+	if status != http.StatusOK {
+		t.Fatalf("join status=%d body=%s", status, body)
+	}
+	var joined struct {
+		Data struct {
+			Agent struct {
+				ID string `json:"id"`
+			} `json:"agent"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &joined); err != nil {
+		t.Fatal(err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() {
+		var ignored any
+		waitDone <- server.client.WithAgent(joined.Data.Agent.ID).
+			Do(context.Background(), http.MethodGet, "/v1/wait", url.Values{"timeout": {"60s"}}, nil, &ignored)
+	}()
+	// Give the wait time to reach the service and block on its predicate.
+	time.Sleep(200 * time.Millisecond)
+
+	start := time.Now()
+	server.cancel()
+	if err := server.wait(); err != nil {
+		t.Fatalf("shutdown with a pending wait returned %v, want a clean exit", err)
+	}
+	if elapsed := time.Since(start); elapsed > shutdownTimeout/2 {
+		t.Fatalf("shutdown took %s with a pending wait; it must not wait out the %s budget", elapsed, shutdownTimeout)
+	}
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pending wait outlived the service")
 	}
 }

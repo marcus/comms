@@ -87,3 +87,47 @@ func TestExpiryOverrides(t *testing.T) {
 	}
 }
 func ptr[T any](v T) *T { return &v }
+
+func TestNotifierWakesEveryCurrentSubscriberAndReleasesSlots(t *testing.T) {
+	var notifier Notifier
+	notifier.Notify() // No subscribers must not panic or block.
+
+	first, releaseFirst := notifier.Subscribe()
+	second, releaseSecond := notifier.Subscribe()
+	if notifier.Subscribers() != 2 {
+		t.Fatalf("subscribers=%d", notifier.Subscribers())
+	}
+	notifier.Notify()
+	for name, signals := range map[string]<-chan struct{}{"first": first, "second": second} {
+		select {
+		case <-signals:
+		default:
+			t.Fatalf("%s subscriber was not woken", name)
+		}
+	}
+
+	// Sends never block: repeated notifications coalesce into the one pending
+	// wake-up that is enough to force a fresh predicate check.
+	for i := 0; i < 100; i++ {
+		notifier.Notify()
+	}
+	if len(first) != 1 {
+		t.Fatalf("pending wake-ups=%d, want 1", len(first))
+	}
+
+	releaseFirst()
+	releaseFirst() // Releasing twice is safe.
+	if notifier.Subscribers() != 1 {
+		t.Fatalf("subscribers after release=%d", notifier.Subscribers())
+	}
+	notifier.Notify()
+	select {
+	case <-second:
+	default:
+		t.Fatal("remaining subscriber was not woken")
+	}
+	releaseSecond()
+	if notifier.Subscribers() != 0 {
+		t.Fatalf("subscribers after all releases=%d", notifier.Subscribers())
+	}
+}

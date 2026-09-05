@@ -122,7 +122,7 @@ func commandPolicyOf(command string) commandPolicy {
 		return policyInspectOnly
 	case "restart":
 		return policyRestart
-	case "join", "whoami", "agents", "agent", "topic", "topics", "subscriptions", "publish", "send", "reply", "inbox", "peek", "read-through", "receipts", "thread", "search", "observe", "retention", "purge", "export":
+	case "join", "whoami", "agents", "agent", "topic", "topics", "subscriptions", "publish", "send", "reply", "inbox", "wait", "peek", "read-through", "receipts", "thread", "search", "observe", "retention", "purge", "export":
 		return policyAutoStart
 	default:
 		return policyProcessLocal
@@ -144,17 +144,40 @@ func autoStartEnabled(flagDisabled bool, getenv func(string) string) bool {
 	}
 }
 
+// commandContext bounds the request itself. Waiting commands widen it past
+// their service-side deadline so the service, not the transport, reports an
+// expired wait; it is built lazily, after any readiness work, so daemon
+// startup does not consume that margin.
 func (r *runner) commandContext() context.Context {
 	if r.cmdCtx != nil {
 		return r.cmdCtx
 	}
-	if r.g.timeout <= 0 {
+	limit := r.g.timeout
+	if r.requestTimeout > 0 {
+		limit = r.requestTimeout
+	}
+	if limit <= 0 {
 		r.cmdCtx = r.env.Context
 		r.cmdCancel = func() {}
 		return r.cmdCtx
 	}
-	r.cmdCtx, r.cmdCancel = context.WithTimeout(r.env.Context, r.g.timeout)
+	r.cmdCtx, r.cmdCancel = context.WithTimeout(r.env.Context, limit)
 	return r.cmdCtx
+}
+
+// readyContext bounds bringing the local service up and reconciling it. A long
+// --timeout is a patience budget for the operation the caller asked for, not
+// for daemon startup, so readiness keeps the ordinary bound either way.
+func (r *runner) readyContext() context.Context {
+	if r.readyCtx != nil {
+		return r.readyCtx
+	}
+	limit := r.g.timeout
+	if limit <= 0 || limit > defaultCommandTimeout {
+		limit = defaultCommandTimeout
+	}
+	r.readyCtx, r.readyCancel = context.WithTimeout(r.env.Context, limit)
+	return r.readyCtx
 }
 
 func (r *runner) resolveSocket() (string, error) {
@@ -204,7 +227,7 @@ func (a replaceAction) String() string {
 }
 
 func (r *runner) ensureReady(client *httpapi.Client) error {
-	ctx := r.commandContext()
+	ctx := r.readyContext()
 	hs, err := handshake(ctx, client)
 	if err == nil {
 		if err := checkHandshakeCompatibility(hs); err != nil {

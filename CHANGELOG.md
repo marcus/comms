@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+- Exclude the reading agent's own messages from `comms inbox` by default so
+  the inbox shows incoming work, with `--include-self` (`include_self` over
+  HTTP and MCP) to restore them. Compatibility: a session that published or
+  sent a message no longer sees it in its own inbox unless it asks. Nothing is
+  deleted and no cursor moves; topic history, `thread`, `peek`, `search`,
+  `receipts`, `observe`, and `export` are unchanged.
+- Collapse `inbox --threads` to the earliest still-visible message of each
+  thread instead of its structural root, so an incoming reply stays visible in
+  a thread the reader started.
+- Add `comms agent wait AGENT` (`GET /v1/agents/{agent}/wait`) to block until a
+  handle is registered and addressable, replacing startup sleep-and-retry
+  before a first `send`. It proves registration only, never provider liveness.
+- Add `comms wait [--from AGENT] [--thread MESSAGE_ID] [--after CURSOR]`
+  (`GET /v1/wait`) to block until a matching unread message arrives, returning
+  a bounded batch and a continuation cursor. Preexisting matches return
+  immediately and waiting never acknowledges anything.
+- Bound every wait with the global `--timeout` (default 30s, maximum 1h); there
+  is no unbounded mode.
+- Report cancellation as the stable code `canceled` instead of `timeout`, so a
+  caller that goes away is distinguishable from a deadline that expired. Both
+  still exit `5`.
+- Report a service error with the service's own message instead of repeating
+  the error class in front of it, and stop suggesting `comms serve` when a
+  command ends at its own deadline rather than because nothing is listening.
+- Cancel in-flight requests when the service shuts down, so a pending wait
+  cannot delay `comms stop`, `comms restart`, or an auto-daemon replacement.
+
 ## [1.1.0] - 2026-09-04
 
 - Start the local service from ordinary commands such as `join`, `publish`,

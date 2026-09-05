@@ -60,7 +60,7 @@ func TestBlackBoxNewerCLIReplacesOlderAutoDaemonOnce(t *testing.T) {
 	if published["title"] != "Upgrade" {
 		t.Fatalf("publish=%#v", published)
 	}
-	inbox := runBinJSON(t, newBin, env, "inbox")
+	inbox := runBinJSON(t, newBin, env, "inbox", "--include-self")
 	items, _ := inbox["items"].([]any)
 	if len(items) != 1 {
 		t.Fatalf("inbox=%#v", inbox)

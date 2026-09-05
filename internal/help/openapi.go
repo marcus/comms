@@ -209,7 +209,7 @@ func responseType(id string) reflect.Type {
 		value = app.JoinResponse{}
 	case "agent.whoami":
 		value = whoamiResponse{}
-	case "agent.get", "agent.update", "agent.retire":
+	case "agent.get", "agent.update", "agent.retire", "agent.wait":
 		value = domain.Agent{}
 	case "agent.list":
 		value = app.Page[domain.Agent]{}
@@ -227,6 +227,8 @@ func responseType(id string) reflect.Type {
 		value = domain.Message{}
 	case "message.inbox", "message.topic", "message.thread", "message.search", "message.observe":
 		value = app.Page[domain.Message]{}
+	case "message.wait":
+		value = app.MessageWaitResponse{}
 	case "message.read_through":
 		value = app.ReadThroughResponse{}
 	case "message.receipts":

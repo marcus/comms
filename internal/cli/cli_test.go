@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/marcus/comms/internal/app"
 )
 
 func TestRun(t *testing.T) {
@@ -74,23 +77,97 @@ func TestTopicUpdateRejectsExtraArgumentBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestJSONDeadlineUsesTimeoutCode(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var stderr bytes.Buffer
-	code := Run(Env{Args: []string{"--json", "--socket", filepath.Join(t.TempDir(), "missing.sock"), "health"}, Context: ctx, Stderr: &stderr})
-	if code != 5 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+// Both stop the command with exit 5, but a caller that went away and a
+// deadline that expired are separate stable codes so a waiting caller can tell
+// which happened.
+func TestJSONSeparatesCancellationFromDeadline(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		context func() (context.Context, context.CancelFunc)
+		want    string
+	}{
+		{"cancelled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		}, "canceled"},
+		{"deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}, "timeout"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx, cancel := testCase.context()
+			defer cancel()
+			var stderr bytes.Buffer
+			code := Run(Env{Args: []string{"--json", "--socket", filepath.Join(t.TempDir(), "missing.sock"), "health"}, Context: ctx, Stderr: &stderr})
+			if code != 5 {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			var envelope struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Error.Code != testCase.want {
+				t.Fatalf("error=%s, want %s; body=%s", envelope.Error.Code, testCase.want, stderr.String())
+			}
+		})
 	}
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+}
+
+// A long wait bound is patience for the operation the caller asked for, not
+// for bringing a daemon up, and the transport margin must not be spent on
+// readiness before the request is even issued.
+func TestWaitDeadlinesDoNotWidenServiceReadiness(t *testing.T) {
+	r := &runner{env: Env{Context: context.Background()}, g: globals{timeout: time.Hour, timeoutSet: true}}
+	bound, err := r.waitBound()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Error.Code != "timeout" {
-		t.Fatalf("error=%s body=%s", envelope.Error.Code, stderr.String())
+	if bound != time.Hour {
+		t.Fatalf("wait bound=%s, want the global --timeout", bound)
+	}
+	if r.cmdCtx != nil {
+		t.Fatal("the request deadline started before any readiness work")
+	}
+
+	before := time.Now()
+	readyDeadline, ok := r.readyContext().Deadline()
+	if !ok || readyDeadline.After(before.Add(defaultCommandTimeout+time.Second)) {
+		t.Fatalf("readiness deadline=%v, want it capped at %s", readyDeadline, defaultCommandTimeout)
+	}
+	requestDeadline, ok := r.commandContext().Deadline()
+	if !ok || requestDeadline.Before(before.Add(time.Hour)) {
+		t.Fatalf("request deadline=%v, want it past the %s wait bound", requestDeadline, bound)
+	}
+	r.readyCancel()
+	r.cmdCancel()
+
+	// An ordinary command keeps one bound for everything.
+	ordinary := &runner{env: Env{Context: context.Background()}, g: globals{timeout: 2 * time.Second}}
+	ordinaryDeadline, _ := ordinary.commandContext().Deadline()
+	if ordinaryDeadline.After(time.Now().Add(3 * time.Second)) {
+		t.Fatalf("ordinary request deadline=%v", ordinaryDeadline)
+	}
+	ordinary.cmdCancel()
+
+	// A wait can never be unbounded.
+	for name, g := range map[string]globals{
+		"zero":     {timeout: 0, timeoutSet: true},
+		"negative": {timeout: -time.Second, timeoutSet: true},
+		"too long": {timeout: 2 * app.MaxWaitTimeout, timeoutSet: true},
+	} {
+		unbounded := &runner{env: Env{Context: context.Background()}, g: g}
+		if _, err := unbounded.waitBound(); err == nil {
+			t.Fatalf("%s wait bound was accepted", name)
+		}
+	}
+	// Without an explicit --timeout a wait still gets a documented bound.
+	defaulted := &runner{env: Env{Context: context.Background()}, g: globals{timeout: defaultCommandTimeout}}
+	if got, err := defaulted.waitBound(); err != nil || got != app.DefaultWaitTimeout {
+		t.Fatalf("default wait bound=%s err=%v", got, err)
 	}
 }

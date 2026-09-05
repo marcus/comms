@@ -187,7 +187,12 @@ func TestSteelThreadAutoStartFromJoin(t *testing.T) {
 	runBinJSON(t, bin, env, "topic", "create", "project-comms")
 	runBinJSON(t, bin, env, "topic", "follow", "project-comms")
 	runBinJSON(t, bin, env, "publish", "project-comms", "--title", "Hello", "--body", "from auto-start")
-	inbox := runBinJSON(t, bin, env, "inbox")
+	// The inbox is an attention surface, so the sole agent's own post is
+	// excluded by default and returned only with --include-self.
+	if items, _ := runBinJSON(t, bin, env, "inbox")["items"].([]any); len(items) != 0 {
+		t.Fatalf("own message reached the default inbox: %#v", items)
+	}
+	inbox := runBinJSON(t, bin, env, "inbox", "--include-self")
 	items, _ := inbox["items"].([]any)
 	if len(items) != 1 {
 		t.Fatalf("inbox=%#v", inbox)

@@ -14,9 +14,9 @@ func TestRegistryIsValidAndComplete(t *testing.T) {
 
 	wantIDs := []string{
 		"service.serve", "service.status", "service.stop", "service.restart", "service.shutdown", "store.handshake", "capability.describe", "api.openapi", "instructions.generate", "health.get", "doctor.run", "version.get",
-		"agent.join", "agent.whoami", "agent.get", "agent.update", "agent.retire", "agent.list",
+		"agent.join", "agent.whoami", "agent.get", "agent.update", "agent.retire", "agent.list", "agent.wait",
 		"topic.create", "topic.ensure", "topic.update", "topic.archive", "topic.list", "subscription.follow", "subscription.unfollow", "subscription.list",
-		"message.publish", "message.direct_send", "message.reply", "message.inbox", "message.topic", "message.thread", "message.peek", "message.read_through", "message.receipts", "message.search", "message.observe",
+		"message.publish", "message.direct_send", "message.reply", "message.inbox", "message.wait", "message.topic", "message.thread", "message.peek", "message.read_through", "message.receipts", "message.search", "message.observe",
 		"retention.status", "retention.purge", "diagnostic.export",
 	}
 	gotIDs := make([]string, 0, len(registry))

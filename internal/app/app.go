@@ -242,6 +242,57 @@ type MessageListRequest struct {
 	Topic       string `json:"topic,omitempty"`
 	UnreadOnly  bool   `json:"unread_only,omitempty"`
 	ThreadsOnly bool   `json:"threads_only,omitempty"`
+	// IncludeSelf restores the selected agent's own messages in inbox
+	// projections. Inbox is an attention surface, so it excludes them by
+	// default. It is a query projection only: nothing is deleted, no cursor
+	// moves, and topic history, thread, peek, search, observe, receipts, and
+	// export are unaffected.
+	IncludeSelf bool `json:"include_self,omitempty"`
+}
+
+// Wait timeouts are always bounded. A caller may shorten the default but may
+// not ask a service to hold a request open indefinitely.
+const (
+	DefaultWaitTimeout = 30 * time.Second
+	MaxWaitTimeout     = time.Hour
+)
+
+// AgentWaitRequest awaits logical registration of one addressable handle.
+// Registration is the only predicate: it says nothing about whether the
+// session's process is alive, idle, or reading its inbox.
+type AgentWaitRequest struct {
+	Agent   string        `json:"agent"`
+	Timeout time.Duration `json:"timeout,omitempty"`
+}
+
+// MessageWaitRequest awaits unread messages routed to Agent that match the
+// optional author and thread filters. Waiting never acknowledges anything.
+type MessageWaitRequest struct {
+	Agent       string        `json:"agent"`
+	From        string        `json:"from,omitempty"`
+	Thread      string        `json:"thread,omitempty"`
+	After       string        `json:"after,omitempty"`
+	Limit       int           `json:"limit,omitempty"`
+	IncludeSelf bool          `json:"include_self,omitempty"`
+	Timeout     time.Duration `json:"timeout,omitempty"`
+}
+
+// ResolvedWait is the immutable identity a wait was resolved to once, before
+// it started waiting. Handles and thread members are mutable presentation; a
+// rename during the wait does not retarget it.
+type ResolvedWait struct {
+	AgentID      domain.AgentID   `json:"agent_id"`
+	FromID       domain.AgentID   `json:"from_id,omitempty"`
+	ThreadRootID domain.MessageID `json:"thread_root_id,omitempty"`
+}
+
+// MessageWaitResponse carries the matching batch and the continuation cursor a
+// caller passes back as After to resume without re-reading the same messages.
+// It is distinct from a subscription read cursor and acknowledges nothing.
+type MessageWaitResponse struct {
+	Items  []domain.Message `json:"items"`
+	After  string           `json:"after"`
+	Filter ResolvedWait     `json:"filter"`
 }
 type ThreadRequest struct {
 	PageRequest
@@ -349,6 +400,8 @@ type MessageStore interface {
 	Receipts(context.Context, string, time.Time) ([]Receipt, error)
 	Search(context.Context, SearchRequest, time.Time) (Page[domain.Message], error)
 	Observe(context.Context, ObserveRequest, time.Time) (Page[domain.Message], error)
+	ResolveWait(context.Context, MessageWaitRequest, time.Time) (ResolvedWait, error)
+	MatchingMessages(context.Context, MessageWaitRequest, ResolvedWait, time.Time) (MessageWaitResponse, error)
 }
 type MaintenanceStore interface {
 	Handshake(context.Context) (Handshake, error)
@@ -365,12 +418,20 @@ type Store interface {
 }
 
 type Service struct {
-	agents       AgentStore
-	topics       TopicStore
-	messageStore MessageStore
-	maintenance  MaintenanceStore
-	clock        domain.Clock
+	agents        AgentStore
+	topics        TopicStore
+	messageStore  MessageStore
+	maintenance   MaintenanceStore
+	clock         domain.Clock
+	agentEvents   Notifier
+	messageEvents Notifier
 }
+
+// AgentEvents and MessageEvents expose the service's own change signals. Every
+// mutation reaches the store through Service, so Service is the one place that
+// can announce a committed change without giving an adapter a second job.
+func (s *Service) AgentEvents() EventSource   { return &s.agentEvents }
+func (s *Service) MessageEvents() EventSource { return &s.messageEvents }
 
 func NewService(store Store, clock domain.Clock) *Service {
 	return NewServiceWithStores(store, store, store, store, clock)
@@ -409,7 +470,11 @@ func (s *Service) Join(ctx context.Context, req JoinRequest) (JoinResponse, erro
 	if err := a.Validate(); err != nil {
 		return JoinResponse{}, err
 	}
-	return s.agents.JoinAgent(ctx, req, a, now)
+	joined, err := s.agents.JoinAgent(ctx, req, a, now)
+	if err == nil {
+		s.agentEvents.Notify()
+	}
+	return joined, err
 }
 func (s *Service) GetAgent(ctx context.Context, ref string, touch bool) (domain.Agent, error) {
 	if strings.TrimSpace(ref) == "" {
@@ -429,7 +494,11 @@ func (s *Service) UpdateAgent(ctx context.Context, req UpdateAgentRequest) (doma
 			return domain.Agent{}, err
 		}
 	}
-	return s.agents.UpdateAgent(ctx, req, s.clock.Now())
+	updated, err := s.agents.UpdateAgent(ctx, req, s.clock.Now())
+	if err == nil && req.Handle != nil {
+		s.agentEvents.Notify()
+	}
+	return updated, err
 }
 func (s *Service) RetireAgent(ctx context.Context, req RetireAgentRequest) (domain.Agent, error) {
 	if err := req.Validate(); err != nil {
@@ -524,7 +593,13 @@ func (s *Service) Follow(ctx context.Context, req FollowRequest) (domain.Subscri
 	if req.Agent == "" || req.Topic == "" {
 		return domain.Subscription{}, requiredErr("agent and topic")
 	}
-	return s.topics.Follow(ctx, req, s.clock.Now())
+	subscription, err := s.topics.Follow(ctx, req, s.clock.Now())
+	if err == nil {
+		// Following a topic that already holds unread messages routes them to
+		// this agent, which can satisfy a wait that is already blocked.
+		s.messageEvents.Notify()
+	}
+	return subscription, err
 }
 func (s *Service) Unfollow(ctx context.Context, req UnfollowRequest) (domain.Subscription, error) {
 	if e := req.Validate(); e != nil {
@@ -582,7 +657,11 @@ func (s *Service) prepareAnd(ctx context.Context, m Mutation, author, topic, par
 	if e = probe.Validate(parent != ""); e != nil {
 		return domain.Message{}, e
 	}
-	return fn(ctx, PreparedMessage{Mutation: m, ID: id, Author: author, Topic: topic, Parent: parent, Recipient: recipient, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata, Now: now})
+	message, e := fn(ctx, PreparedMessage{Mutation: m, ID: id, Author: author, Topic: topic, Parent: parent, Recipient: recipient, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata, Now: now})
+	if e == nil {
+		s.messageEvents.Notify()
+	}
+	return message, e
 }
 func (s *Service) Inbox(ctx context.Context, req MessageListRequest) (Page[domain.Message], error) {
 	if req.Agent == "" {
@@ -615,6 +694,133 @@ func (s *Service) Thread(ctx context.Context, req ThreadRequest) (Page[domain.Me
 	req.PageRequest = p
 	return s.messageStore.Thread(ctx, req, s.clock.Now())
 }
+
+// WaitForAgent blocks until ref resolves to an active agent and returns it.
+// It returns immediately when ref already resolves. The wait predicate is
+// logical registration in Comms and nothing more: it does not assert that the
+// session's provider process is alive, idle, has read a message, or will
+// answer one. It never creates, renames, retires, or takes over an identity.
+//
+// A ref that resolves to a retired agent is a conflict rather than an
+// unbounded wait, because a retired handle stays taken. A missing ref waits
+// until the bounded deadline expires (timeout) or the caller cancels
+// (cancelled); the two are distinguishable in structured output.
+func (s *Service) WaitForAgent(ctx context.Context, req AgentWaitRequest) (domain.Agent, error) {
+	if strings.TrimSpace(req.Agent) == "" {
+		return domain.Agent{}, requiredErr("agent")
+	}
+	timeout, err := normalizeWaitTimeout(req.Timeout)
+	if err != nil {
+		return domain.Agent{}, err
+	}
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Subscribe before the first lookup so a join committed between the
+	// lookup and the wait cannot be missed.
+	signals, release := s.agentEvents.Subscribe()
+	defer release()
+	for {
+		agent, err := s.agents.GetAgent(ctx, req.Agent, false, s.clock.Now())
+		switch {
+		case err == nil && agent.RetiredAt == nil:
+			return agent, nil
+		case err == nil:
+			return domain.Agent{}, fmt.Errorf("%w: agent %q is retired", ErrConflict, req.Agent)
+		case !errors.Is(err, ErrNotFound):
+			return domain.Agent{}, err
+		}
+		select {
+		case <-signals:
+		case <-deadline.Done():
+			return domain.Agent{}, waitEnded(ctx, fmt.Sprintf("agent %q did not join within %s", req.Agent, timeout))
+		}
+	}
+}
+
+// WaitForMessages blocks until at least one unread message routed to the
+// selected agent matches the optional author and thread filters, and returns
+// that bounded batch with a continuation cursor.
+//
+// Matching is filtered in the store before the limit, so a batch is never
+// silently short. Waiting is a read: it does not mark anything read, advance a
+// durable read-through cursor, send or auto-reply to anything, or promise that
+// the recipient will act. Preexisting unread matches return immediately, and
+// the returned After cursor resumes the stream without repeating a message.
+// Self-authored messages do not satisfy a wait unless IncludeSelf is set,
+// matching the inbox default.
+func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (MessageWaitResponse, error) {
+	if strings.TrimSpace(req.Agent) == "" {
+		return MessageWaitResponse{}, requiredErr("agent")
+	}
+	timeout, err := normalizeWaitTimeout(req.Timeout)
+	if err != nil {
+		return MessageWaitResponse{}, err
+	}
+	page, err := PageRequest{Limit: req.Limit}.normalized()
+	if err != nil {
+		return MessageWaitResponse{}, err
+	}
+	req.Limit = page.Limit
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Subscribe before resolving and querying so an arrival committed during
+	// the first pass still wakes this waiter.
+	signals, release := s.messageEvents.Subscribe()
+	defer release()
+	// Mutable handles and thread members are resolved to stable identity once;
+	// a later rename does not retarget an in-flight wait.
+	resolved, err := s.messageStore.ResolveWait(ctx, req, s.clock.Now())
+	if err != nil {
+		return MessageWaitResponse{}, err
+	}
+	for {
+		result, err := s.messageStore.MatchingMessages(ctx, req, resolved, s.clock.Now())
+		if err != nil {
+			return MessageWaitResponse{}, err
+		}
+		if len(result.Items) != 0 {
+			result.Filter = resolved
+			return result, nil
+		}
+		select {
+		case <-signals:
+		case <-deadline.Done():
+			return MessageWaitResponse{}, waitEnded(ctx, fmt.Sprintf("no matching message arrived within %s", timeout))
+		}
+	}
+}
+
+func normalizeWaitTimeout(d time.Duration) (time.Duration, error) {
+	if d == 0 {
+		return DefaultWaitTimeout, nil
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%w: timeout must be positive", domain.ErrInvalid)
+	}
+	if d > MaxWaitTimeout {
+		return 0, fmt.Errorf("%w: timeout must not exceed %s", domain.ErrInvalid, MaxWaitTimeout)
+	}
+	return d, nil
+}
+
+// waitEnded separates a caller that went away from a deadline that expired, so
+// structured output can say which happened. Both are exit 5.
+func waitEnded(ctx context.Context, description string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return waitTimeout(description)
+}
+
+// waitTimeout classifies as context.DeadlineExceeded without embedding the
+// sentinel's text, so a transport that re-wraps it does not repeat itself.
+type waitTimeout string
+
+func (e waitTimeout) Error() string { return string(e) }
+func (waitTimeout) Is(target error) bool {
+	return target == context.DeadlineExceeded
+}
+
 func (s *Service) Peek(ctx context.Context, message string) (domain.Message, error) {
 	if message == "" {
 		return domain.Message{}, requiredErr("message")
