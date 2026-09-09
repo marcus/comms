@@ -2,7 +2,7 @@
 
 - **Status:** Active / Proposed. Reviewed against comms v1.3.0 and comms-web `main` on 2026-09-08; see the changelog at the bottom for what changed from the first draft.
 - **Repos:** Orchestrated entirely from **comms** (this repo). Phases 1–5 land here; phase 6 touches **comms-web** (`~/code/comms-web`), which only consumes the new receipts shape. comms-web carries a pointer stub to this file.
-- **Tracking:** `td` issues live in this repo, including the comms-web phase.
+- **Tracking:** td-1c78dd in this repo covers every phase, including the comms-web one.
 - **Depends on:** comms v1.3.0 (single-writer SQLite store, Unix socket HTTP API, `--as`/session identity), comms-web receipts component.
 
 ---
