@@ -1,6 +1,6 @@
 # Comms message retrieval tracking, seen receipts, and lean inbox
 
-- **Status:** Active / Proposed. Reviewed against comms v1.3.0 and comms-web `main` on 2026-09-08; see the changelog at the bottom for what changed from the first draft.
+- **Status:** Implemented on 2026-09-08 across comms and comms-web, and running locally. All six phases landed; see the changelog for what changed along the way.
 - **Repos:** Orchestrated entirely from **comms** (this repo). Phases 1–5 land here; phase 6 touches **comms-web** (`~/code/comms-web`), which only consumes the new receipts shape. comms-web carries a pointer stub to this file.
 - **Tracking:** td-1c78dd in this repo covers every phase, including the comms-web one.
 - **Depends on:** comms v1.3.0 (single-writer SQLite store, Unix socket HTTP API, `--as`/session identity), comms-web receipts component.
@@ -234,49 +234,49 @@ Inspectors (not subscribed):
 
 Order matters: phases 1–3 make a daemon that records and exposes the data, phases 4–5 make the CLI honest about it, phase 6 is the UI. Each phase is a commit with tests; nothing ships until phase 5 because the receipts shape change and the CLI renderer must land together.
 
-### Phase 1: Storage (comms)
-- [ ] Generalize `store.migrate` to apply embedded migrations in order; bump `schemaVersion` and `app.SchemaVersion` to 2. Test: a v1 database opens and migrates; a v3 database is refused.
-- [ ] Add `002_message_retrievals.sql`.
-- [ ] Add `app.RetrievalEvent` and `RecordRetrievals` on the message store; batch upsert with in-transaction agent resolution and author skip.
-- [ ] Extend `Receipts` to return `app.ReceiptReport{Subscribers, Inspectors}` with the enriched fields.
-- [ ] `Snapshot` includes retrievals; `Purge` test proves cascade.
+### Phase 1: Storage (comms) — done
+- [x] Generalize `store.migrate` to apply embedded migrations in order; bump `schemaVersion` and `app.SchemaVersion` to 2. Test: a v1 database opens and migrates; a v3 database is refused.
+- [x] Add `002_message_retrievals.sql`.
+- [x] Add `app.RetrievalEvent` and `RecordRetrievals` on the message store; batch upsert with in-transaction agent resolution and author skip.
+- [x] Extend `Receipts` to return `app.ReceiptReport{Subscribers, Inspectors}` with the enriched fields.
+- [x] `Snapshot` includes retrievals; `Purge` test proves cascade.
 
-### Phase 2: Lean inbox (comms)
-- [ ] `InboxDefaultLimit = 20` applied in `Service.Inbox` when `Limit == 0`.
-- [ ] `Full bool` on `MessageListRequest`; `?full` parsed in the inbox handler; `--full` in the CLI.
-- [ ] `domain.Message` gains a `BodyTruncated` field serialized as `body_truncated` and omitted when false; a rune-safe preview helper in `app` applies it to the inbox page when `full` is not set.
-- [ ] CLI human render shows the truncation hint when `body_truncated` is set; `--json` passes the payload through.
-- [ ] Tests at app, HTTP, and CLI level for preview length, paragraph cut, multibyte safety, `--full`, and the 20 default.
+### Phase 2: Lean inbox (comms) — done
+- [x] `InboxDefaultLimit = 20` applied in `Service.Inbox` when `Limit == 0`.
+- [x] `Full bool` on `MessageListRequest`; `?full` parsed in the inbox handler; `--full` in the CLI.
+- [x] `domain.Message` gains a `BodyTruncated` field serialized as `body_truncated` and omitted when false; a rune-safe preview helper in `app` applies it to the inbox page when `full` is not set.
+- [x] CLI human render shows the truncation hint when `body_truncated` is set; `--json` passes the payload through.
+- [x] Tests at app, HTTP, and CLI level for preview length, paragraph cut, multibyte safety, `--full`, and the 20 default.
 
-### Phase 3: Recorder (comms)
-- [ ] `app.RetrievalRecorder` with coalescing, 30s same-depth suppression, 1s / 200-key flush, `Flush()`, `Close()`, drop counters.
-- [ ] Wire into `Inbox` (preview or full), `Peek`, `Thread`, `TopicMessages`, `Search`, `WaitForMessages` (full). `Observe` and `Snapshot` untouched.
-- [ ] Optional `Agent` on `Peek`/`Thread`/`TopicMessages`/`Search` requests; HTTP handlers pass the header through when present.
-- [ ] `Service.Close()` drains; `service.Run` calls it before the store closes.
-- [ ] `Doctor` reports recorder counters.
-- [ ] Tests with a fake store: author skipped, unknown agent skipped, depth escalation, suppression window, flush on close, overload drop.
+### Phase 3: Recorder (comms) — done
+- [x] `app.RetrievalRecorder` with coalescing, 30s same-depth suppression, 1s / 200-key flush, `Flush()`, `Close()`, drop counters.
+- [x] Wire into `Inbox` (preview or full), `Peek`, `Thread`, `TopicMessages`, `Search`, `WaitForMessages` (full). `Observe` and `Snapshot` untouched.
+- [x] Optional `Agent` on `Peek`/`Thread`/`TopicMessages`/`Search` requests; HTTP handlers pass the header through when present.
+- [x] `Service.Close()` drains; `service.Run` calls it before the store closes.
+- [x] `Doctor` reports recorder counters.
+- [x] Tests with a fake store: author skipped, unknown agent skipped, depth escalation, suppression window, flush on close, overload drop.
 
-### Phase 4: Receipts surface (comms)
-- [ ] HTTP receipts handler returns the object shape.
-- [ ] CLI `receipts` renderer with the four states and the inspectors section; `--detailed`.
-- [ ] Help registry, guidance line, OpenAPI, MCP descriptions updated; `registry_test` green.
-- [ ] Release note calls out the receipts shape change and the schema bump/rollback caveat.
+### Phase 4: Receipts surface (comms) — done
+- [x] HTTP receipts handler returns the object shape.
+- [x] CLI `receipts` renderer with the four states and the inspectors section; `--detailed`.
+- [x] Help registry, guidance line, OpenAPI, MCP descriptions updated; `registry_test` green.
+- [x] Release note calls out the receipts shape change and the schema bump/rollback caveat.
 
-### Phase 5: End-to-end proof (comms)
+### Phase 5: End-to-end proof (comms) — done
 Integration test on a fresh daemon (the CLI integration harness in `internal/cli/integration_test.go`):
-- [ ] `inbox` default returns previews and 20 items; `inbox --full` returns full bodies.
-- [ ] `inbox` marks the reader `seen`; `peek` marks `inspected`; neither moves the cursor (`inbox --unread` still lists the message).
-- [ ] A non-subscriber `peek` appears under inspectors.
-- [ ] `read-through` yields `read` while keeping `seen_at`/`inspected_at`.
-- [ ] `observe` with an identity records nothing.
-- [ ] Purge removes the retrieval rows with the message; export includes them beforehand.
-- [ ] A 500-message `search` page with recording on completes within the same bound as with recording off (recording must stay off the read path).
+- [x] `inbox` default returns previews and 20 items; `inbox --full` returns full bodies.
+- [x] `inbox` marks the reader `seen`; `peek` marks `inspected`; neither moves the cursor (`inbox --unread` still lists the message).
+- [x] A non-subscriber `peek` appears under inspectors.
+- [x] `read-through` yields `read` while keeping `seen_at`/`inspected_at`.
+- [x] `observe` with an identity records nothing.
+- [x] Purge removes the retrieval rows with the message; export includes them beforehand.
+- [x] A 500-message `search` page with recording on completes within the same bound as with recording off (recording must stay off the read path).
 
-### Phase 6: Comms Web (comms-web)
-- [ ] Types, route, validator, and derived-state helper with unit tests in `receipts.test.ts`.
-- [ ] `MessageReceipts.svelte` four-state rendering, inspectors section, footer.
-- [ ] Remove the unused store-level receipts fetch.
-- [ ] Manual check against a local daemon: states update within one poll interval after `inbox`, `peek`, and `read-through` from a second agent.
+### Phase 6: Comms Web (comms-web) — done
+- [x] Types, route, validator, and derived-state helper with unit tests in `receipts.test.ts`.
+- [x] `MessageReceipts.svelte` four-state rendering, inspectors section, footer.
+- [x] Remove the unused store-level receipts fetch.
+- [x] Manual check against a local daemon: states update within one poll interval after `inbox`, `peek`, and `read-through` from a second agent.
 
 ---
 
@@ -293,3 +293,21 @@ Integration test on a fresh daemon (the CLI integration harness in `internal/cli
 
 - 2026-09-08: Marcus confirmed the four open questions (§11); plan moved from comms-web to comms.
 - 2026-09-08: reviewed against comms v1.3.0. Corrected: migration runner is not general (must be before 002 can exist); the receipts change is breaking, not additive; recording belongs in `internal/app`, not `internal/service`; `is_subscriber` column dropped in favor of a live join; `DefaultLimit` is shared, so inbox gets its own default instead; CLI already sends identity on peek/thread/search; `observe`/`export` explicitly excluded; `search` and `topic messages` added as full retrievals; `body_preview: true` renamed to `body_truncated`; help registry/OpenAPI/MCP updates added; `Service.Close` drain added; doctor counters added; web validator and unused store fetch called out.
+- 2026-09-08: implemented and landed. Deviations worth stating:
+  - **`comms stop` and `comms restart` had to learn to replace an older-schema
+    service.** The client refused to talk to a daemon whose schema it did not
+    match, and that refusal covered the two commands an upgrade needs, so the
+    v1 daemon could not be replaced by the v2 binary at all. Those paths now
+    accept an older schema and still refuse a newer one.
+  - **The 500-message search timing check moved to the store package.** Driving
+    500 publishes through the CLI harness would have made the black-box test
+    slow for no extra coverage; the guard compares an identified page against an
+    unidentified one directly against the service.
+  - **The purge cascade check stayed at store level** rather than the CLI
+    integration test, because expiring a message needs a controllable clock. The
+    black-box test proves instead that export carries the rows.
+  - **`seen_at` is the first sighting, matching the §7.2 example.** Recency is
+    read from `seen_count` and `inspected_at`.
+  - **`make install-local` and `make use-homebrew` were added.** Installing this
+    checkout needed a one-command way to take over the Homebrew binary and hand
+    it back, which comms lacked and sidecar has.

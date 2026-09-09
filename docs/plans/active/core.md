@@ -32,7 +32,7 @@ Version 1 is one user and one machine. Cross-project communication is ordinary b
 11. **CLI-first delivery through the service:** only process-local commands such as `help`, `openapi`, and `version` run without the service. Stateful CLI commands, including `hello`, use a small versioned HTTP API over a local Unix socket. Optional loopback TCP ships with v1. MCP, Sidecar, and SSH RPC adapters follow after that contract is proven; Sidecar will be an API client and SSH will invoke structured RPC against the same application operations.
 12. **Queues are deferred:** competing consumers require claims, leases, retries, and completion state and therefore constitute work dispatch, not basic pub/sub.
 13. **A narrow store seam, not a backend framework:** application use cases depend on purpose-specific store interfaces implemented by SQLite. This supports unit tests and keeps SQL out of domain logic without committing v1 to runtime backend selection or a filesystem implementation.
-14. **Read receipts are cursor-derived:** a sender can query which subscribed sessions have explicitly acknowledged through a message. Receipt state comes from subscription cursors, with one checkpoint recorded per cursor advance to preserve the first acknowledgment time; Comms does not create one delivery row per recipient per message. A receipt means “marked read through this sequence,” not proof that a model understood the content.
+14. **Receipts carry two independent signals:** acknowledgment and retrieval. Acknowledgment stays cursor-derived — a sender can query which subscribed sessions have explicitly read through a message, from subscription cursors plus one checkpoint per cursor advance, never one delivery row per recipient per message. Retrieval is the separate fact that a message actually reached an identified agent, at preview depth (an inbox listing) or full depth (a complete body returned by peek, thread, wait, topic history, search, or `inbox --full`), stored as one row per message and agent. Retrieval never moves a cursor, is recorded off the read path so a read never waits for it, and excludes the author and the operator surfaces `observe` and `export`. Neither signal proves that a model understood the content, and no signal is delivery.
 
 ## Domain model
 
@@ -203,12 +203,12 @@ comms topics [--limit N] [--cursor CURSOR]
 comms publish TOPIC --title TEXT [--body TEXT | --body-file PATH | -]
 comms send @AGENT --title TEXT [--body TEXT | --body-file PATH | -]
 comms reply MESSAGE_ID [--title TEXT] [--body TEXT | --body-file PATH | -]
-comms inbox [--unread] [--threads] [--include-self] [--limit N] [--cursor CURSOR]
+comms inbox [--unread] [--threads] [--include-self] [--full] [--limit N] [--cursor CURSOR]
 comms wait [--from AGENT] [--thread MESSAGE_ID] [--after CURSOR] [--include-self]
            [--limit N] [--timeout DURATION]
 comms peek MESSAGE_ID
 comms read-through MESSAGE_ID
-comms receipts MESSAGE_ID
+comms receipts MESSAGE_ID [--detailed]
 comms thread MESSAGE_ID [--limit N] [--cursor CURSOR]
 comms search QUERY [--from AGENT] [--topic TOPIC] [--limit N] [--cursor CURSOR]
 comms observe [--limit N] [--cursor CURSOR]
