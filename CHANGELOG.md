@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- Record message retrieval, so operators can tell a busy fleet from a dead one.
+  Comms now stores who a message actually reached and how much of it: `preview`
+  when it appeared in an agent's inbox listing, `full` when a complete body was
+  returned by `peek`, `thread`, `wait`, `topic messages`, `search`, or
+  `inbox --full`. Recording is attributed only to identified agents, never
+  touches a read cursor, and is skipped for an agent reading its own message and
+  for the operator surfaces `observe` and `export`. It runs off the read path:
+  a saturated writer costs a retry and then a counted drop that `comms doctor`
+  reports, never a slow or failed read.
+- **Breaking:** `GET /v1/messages/{message}/receipts` returns an object,
+  `{"subscribers": [...], "inspectors": [...]}`, instead of a bare array.
+  Subscriber entries keep `state` and `read_at` and gain `seen_at`,
+  `inspected_at`, and `seen_count`; `inspectors` lists identified readers that
+  are not subscribed, such as an orchestrator that peeked. Update clients that
+  read the array directly. The bundled CLI and Comms Web ship with the change.
+- `comms receipts MESSAGE_ID` gets its own renderer showing four states per
+  agent — acknowledged, opened the full body, saw the preview, untouched — plus
+  an inspectors section. `--detailed` adds absolute timestamps, visit counts,
+  and harness and project context.
+- **Breaking:** `comms inbox` and `GET /v1/inbox` return body previews by
+  default, cut to the lead paragraph and at most 160 characters and marked
+  `body_truncated`, in pages of 20 rather than 50. Pass `--full` or
+  `?full=true` for complete bodies. `wait` still returns full bodies. An agent
+  that read whole bodies from the inbox must now ask for them.
+- **Breaking (rollback):** the store schema moves to version 2 and the
+  migration runner now applies every embedded migration in order. An older
+  comms binary refuses to open a version 2 database, so rolling the binary back
+  means restoring the database with it.
+
 ## [1.3.0] - 2026-09-04
 
 - Add direct latest-message navigation for topics and threads via `--latest`

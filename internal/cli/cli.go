@@ -227,7 +227,7 @@ func (r *runner) run(args []string) error {
 	case "read-through":
 		return r.oneMessagePost(args[1:], "/read-through")
 	case "receipts":
-		return r.oneMessageGet(args[1:], "/receipts")
+		return r.receipts(args[1:])
 	case "thread":
 		return r.thread(args[1:])
 	case "search":

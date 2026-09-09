@@ -232,7 +232,7 @@ func responseType(id string) reflect.Type {
 	case "message.read_through":
 		value = app.ReadThroughResponse{}
 	case "message.receipts":
-		value = []app.Receipt{}
+		value = app.ReceiptReport{}
 	case "retention.status":
 		value = app.RetentionStatus{}
 	case "retention.purge":

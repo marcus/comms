@@ -117,6 +117,7 @@ func AgentInstructions() Instructions {
 			"The inbox excludes your own messages by default so it shows incoming work; --include-self restores them, and every other surface always retains them.",
 			"Waiting is bounded: it returns a match, times out, or reports cancellation, and never blocks forever.",
 			"Read-through advances one topic cursor through the named message and acknowledges all earlier visible sequences.",
+			"Inbox bodies are previews by default: triage from them, peek or thread what you will act on, and still read-through to acknowledge, because retrieval is recorded but is not an acknowledgment.",
 			"Stable record IDs do not change when friendly handles or topic names change.",
 			"Structured responses, error codes, and cursor meanings follow versioned compatibility contracts.",
 		},
