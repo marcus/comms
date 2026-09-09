@@ -14,7 +14,10 @@ import (
 	"github.com/marcus/comms/internal/service"
 )
 
-func TestBlackBoxThreeSessionConversation(t *testing.T) {
+// startDaemon runs a real service over a Unix socket for a black-box test and
+// returns its directory and socket path.
+func startDaemon(t *testing.T) (string, string) {
+	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "comms-test-")
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +44,11 @@ func TestBlackBoxThreeSessionConversation(t *testing.T) {
 		}
 	})
 	waitForSocket(t, socket)
+	return dir, socket
+}
+
+func TestBlackBoxThreeSessionConversation(t *testing.T) {
+	dir, socket := startDaemon(t)
 
 	alpha := filepath.Join(dir, "alpha.json")
 	beta := filepath.Join(dir, "beta.json")
@@ -531,5 +539,150 @@ func TestTwoAgentRecentHistoryJourney(t *testing.T) {
 	compactStr := stdout.String()
 	if !strings.Contains(compactStr, "topic:") || !strings.Contains(compactStr, "author:") {
 		t.Fatalf("compact output missing routing context:\n%s", compactStr)
+	}
+}
+
+// awaitReceipts polls until the receipts report satisfies want, proving the
+// recorder's background flush reaches the store without a fixed sleep.
+func awaitReceipts(t *testing.T, socket, message string, want func(map[string]any) bool) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var report map[string]any
+	for time.Now().Before(deadline) {
+		report = runJSON(t, socket, nil, "receipts", message)
+		if want(report) {
+			return report
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("receipts never reached the expected state: %#v", report)
+	return nil
+}
+
+func receiptFor(t *testing.T, report map[string]any, list, handle string) map[string]any {
+	t.Helper()
+	for _, raw := range arrayValue(t, report, list) {
+		entry := raw.(map[string]any)
+		if mapValue(t, entry, "agent")["handle"] == handle {
+			return entry
+		}
+	}
+	return nil
+}
+
+func TestRetrievalTrackingSurvivesTheWholeStack(t *testing.T) {
+	dir, socket := startDaemon(t)
+	author := filepath.Join(dir, "author.json")
+	reader := filepath.Join(dir, "reader.json")
+	inspector := filepath.Join(dir, "inspector.json")
+	watcher := filepath.Join(dir, "watcher.json")
+	runJSON(t, socket, nil, "join", "author", "--harness", "codex", "--context", author)
+	runJSON(t, socket, nil, "join", "reader", "--harness", "claude-code", "--context", reader)
+	runJSON(t, socket, nil, "join", "inspector", "--context", inspector)
+	runJSON(t, socket, nil, "join", "watcher", "--context", watcher)
+	authorEnv := map[string]string{"COMMS_CONTEXT": author}
+	readerEnv := map[string]string{"COMMS_CONTEXT": reader}
+
+	runJSON(t, socket, authorEnv, "topic", "create", "retrieval")
+	for _, path := range []string{author, reader} {
+		runJSON(t, socket, map[string]string{"COMMS_CONTEXT": path}, "topic", "follow", "retrieval")
+	}
+	long := "Headline that fits\n\n" + strings.Repeat("detail ", 200)
+	var lastID string
+	for i := 0; i < 25; i++ {
+		published := runJSON(t, socket, authorEnv, "publish", "retrieval", "--title", fmt.Sprintf("note %d", i), "--body", long)
+		lastID = stringValue(t, published, "id")
+	}
+
+	// The default inbox is a lean page of previews.
+	box := runJSON(t, socket, readerEnv, "inbox")
+	items := arrayValue(t, box, "items")
+	if len(items) != 20 {
+		t.Fatalf("default inbox returned %d items, want 20", len(items))
+	}
+	first := items[0].(map[string]any)
+	if first["body"] != "Headline that fits" || first["body_truncated"] != true {
+		t.Fatalf("inbox item was not a preview: %#v", first)
+	}
+	full := runJSON(t, socket, readerEnv, "inbox", "--full", "--limit", "1")
+	fullItem := arrayValue(t, full, "items")[0].(map[string]any)
+	if fullItem["body"] != long {
+		t.Fatalf("--full returned a preview: %#v", fullItem)
+	}
+	if _, marked := fullItem["body_truncated"]; marked {
+		t.Fatalf("--full marked a body truncated: %#v", fullItem)
+	}
+
+	// The reader saw the newest message in both listings; the full listing
+	// escalates it to an inspection.
+	report := awaitReceipts(t, socket, lastID, func(report map[string]any) bool {
+		entry := receiptFor(t, report, "subscribers", "reader")
+		return entry != nil && entry["seen_at"] != nil && entry["inspected_at"] != nil
+	})
+	readerReceipt := receiptFor(t, report, "subscribers", "reader")
+	if readerReceipt["state"] != "unread" {
+		t.Fatalf("retrieval acknowledged the message: %#v", readerReceipt)
+	}
+	// Retrieval never moves a cursor: everything is still unread.
+	unread := runJSON(t, socket, readerEnv, "inbox", "--unread", "--limit", "25")
+	if got := len(arrayValue(t, unread, "items")); got != 25 {
+		t.Fatalf("retrieval advanced a cursor: %d unread messages remain", got)
+	}
+
+	// A non-subscriber that peeks is an inspector, not a subscriber.
+	runJSON(t, socket, map[string]string{"COMMS_CONTEXT": inspector}, "peek", lastID)
+	// An operator surface records nothing, even with an identity attached.
+	runJSON(t, socket, map[string]string{"COMMS_CONTEXT": watcher}, "observe", "--limit", "5")
+	report = awaitReceipts(t, socket, lastID, func(report map[string]any) bool {
+		return receiptFor(t, report, "inspectors", "inspector") != nil
+	})
+	peeked := receiptFor(t, report, "inspectors", "inspector")
+	if peeked["inspected_at"] == nil {
+		t.Fatalf("peek did not record a full inspection: %#v", peeked)
+	}
+	if entry := receiptFor(t, report, "inspectors", "watcher"); entry != nil {
+		t.Fatalf("observe recorded a retrieval: %#v", entry)
+	}
+	if entry := receiptFor(t, report, "inspectors", "author"); entry != nil {
+		t.Fatalf("the author was recorded as a reader: %#v", entry)
+	}
+
+	// Acknowledging adds the cursor fact without discarding the retrieval facts.
+	runJSON(t, socket, readerEnv, "read-through", lastID)
+	report = awaitReceipts(t, socket, lastID, func(report map[string]any) bool {
+		entry := receiptFor(t, report, "subscribers", "reader")
+		return entry != nil && entry["state"] == "read"
+	})
+	readerReceipt = receiptFor(t, report, "subscribers", "reader")
+	if readerReceipt["read_at"] == nil || readerReceipt["seen_at"] == nil || readerReceipt["inspected_at"] == nil {
+		t.Fatalf("acknowledgment dropped retrieval facts: %#v", readerReceipt)
+	}
+
+	// Human output names both dimensions.
+	var human bytes.Buffer
+	if code := Run(Env{Args: []string{"--socket", socket, "receipts", lastID}, Stdout: &human, Stderr: &bytes.Buffer{}}); code != 0 {
+		t.Fatalf("human receipts code=%d", code)
+	}
+	for _, want := range []string{"Subscribers:", "@reader", "read ", "Inspectors (not subscribed):", "@inspector", "inspected full body"} {
+		if !strings.Contains(human.String(), want) {
+			t.Fatalf("human receipts omit %q:\n%s", want, human.String())
+		}
+	}
+
+	// Retrieval rows are diagnostic output.
+	var exported bytes.Buffer
+	if code := Run(Env{Args: []string{"--socket", socket, "export"}, Stdout: &exported, Stderr: &bytes.Buffer{}}); code != 0 {
+		t.Fatalf("export code=%d", code)
+	}
+	if !strings.Contains(exported.String(), `"type":"message_retrieval"`) {
+		t.Fatal("export omitted retrieval rows")
+	}
+
+	// Doctor reports the recorder so shed bookkeeping is never silent.
+	doctor := runJSON(t, socket, nil, "doctor")
+	checks := mapValue(t, doctor, "checks")
+	recorder, _ := checks["retrieval_recorder"].(string)
+	if !strings.Contains(recorder, "dropped=0") {
+		t.Fatalf("doctor recorder check=%q", recorder)
 	}
 }

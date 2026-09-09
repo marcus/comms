@@ -296,3 +296,63 @@ func TestInboxPreviewsBodiesAndDefaultsToATwentyItemPage(t *testing.T) {
 		t.Fatalf("short item=%#v", page.Items[0])
 	}
 }
+
+// TestSearchRecordingStaysOffTheReadPath guards the promise that made recording
+// on search and topic history acceptable: the reader gets its page without
+// waiting for the bookkeeping. If Observe ever writes synchronously, a
+// 500-message page turns into 500 upserts on the serialized writer inside the
+// request and this comparison collapses.
+func TestSearchRecordingStaysOffTheReadPath(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	author := join(t, sys.service, "author", nil)
+	reader := join(t, sys.service, "reader", nil)
+	topic := createTopic(t, sys.service, "bulk")
+	follow(t, sys.service, author, topic)
+	follow(t, sys.service, reader, topic)
+	for i := 0; i < 500; i++ {
+		if _, e := sys.service.Publish(ctx, app.PublishRequest{Author: "author", Topic: "bulk", Title: "note", Body: "needle body"}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	search := func(agent string) time.Duration {
+		start := time.Now()
+		page, e := sys.service.Search(ctx, app.SearchRequest{Query: "needle", Agent: agent, PageRequest: app.PageRequest{Limit: 500}})
+		elapsed := time.Since(start)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(page.Items) != 500 {
+			t.Fatalf("search returned %d items", len(page.Items))
+		}
+		return elapsed
+	}
+	fastest := func(agent string) time.Duration {
+		best := time.Hour
+		for i := 0; i < 3; i++ {
+			sys.clock.Advance(retrievalSuppressWindowForTests)
+			if elapsed := search(agent); elapsed < best {
+				best = elapsed
+			}
+			sys.service.Retrievals().Flush()
+		}
+		return best
+	}
+	anonymous := fastest("")
+	recorded := fastest(string(reader.ID))
+	if recorded > 3*anonymous+250*time.Millisecond {
+		t.Fatalf("recorded search took %s against %s anonymous", recorded, anonymous)
+	}
+	sys.service.Retrievals().Flush()
+	var rows int
+	if e := sys.adapter.read.QueryRow("SELECT count(*) FROM message_retrievals WHERE agent_id=?", reader.ID).Scan(&rows); e != nil {
+		t.Fatal(e)
+	}
+	if rows != 500 {
+		t.Fatalf("recorded %d retrieval rows, want 500", rows)
+	}
+}
+
+// retrievalSuppressWindowForTests mirrors the recorder's window so repeated
+// timed reads are each recorded rather than suppressed.
+const retrievalSuppressWindowForTests = 31 * time.Second
