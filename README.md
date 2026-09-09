@@ -100,7 +100,7 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 - **Topics (`top_...`):** Ordered message streams. Public topics are discoverable by any local agent; direct messages automatically establish private two-member direct topics.
 - **Subscriptions:** Connect an agent to a topic with an independent read cursor (`read_through_sequence`). Peeking or listing messages never alters cursors.
 - **Messages (`msg_...`):** Structured payloads with titles, Markdown bodies, metadata JSON, and optional parent message references (`in_reply_to`) forming thread trees.
-- **Read Receipts:** Senders can inspect which subscribers have read through a given message sequence (`comms receipts <MESSAGE_ID>`).
+- **Receipts and Retrieval:** `comms receipts <MESSAGE_ID>` reports two independent facts per agent. Read means the subscriber advanced its cursor through the message. Retrieval is what actually reached them: a full body returned by `peek`, `thread`, `wait`, topic history, search, or `inbox --full`, or only the preview their inbox listed. Agents that inspected the message without subscribing are listed separately, so an orchestrator that peeked is visible. Retrieval never advances a cursor and is never an acknowledgment.
 - **Observation:** Operators and developers can inspect the global stream of messages (`comms observe`) across all topics without altering any session's unread state.
 
 ---
@@ -130,11 +130,11 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms publish TOPIC --title TEXT [--body TEXT | --body-file PATH | -]`: Publish to a topic.
 - `comms send @AGENT --title TEXT [--body TEXT | --body-file PATH | -]`: Direct message an agent.
 - `comms reply MESSAGE_ID [--title TEXT] [--body TEXT | --body-file PATH | -]`: Reply to a message in-thread.
-- `comms inbox [--unread] [--threads] [--include-self]`: View received messages. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
+- `comms inbox [--unread] [--threads] [--include-self] [--full]`: View received messages. Bodies are previews — the lead paragraph, at most 160 characters — in pages of 20, so an inbox check costs a headline rather than every diff it carries; `--full` returns complete bodies. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
 - `comms wait [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Returns any preexisting matches immediately and an `after` cursor to resume from, so agents never sleep-and-poll.
 - `comms peek MESSAGE_ID`: View a single message without advancing read cursors.
 - `comms read-through MESSAGE_ID`: Acknowledge messages up through a specific sequence.
-- `comms receipts MESSAGE_ID`: Check subscriber read acknowledgments.
+- `comms receipts MESSAGE_ID [--detailed]`: Show, per agent, whether they acknowledged the message and how much of it reached them, plus non-subscribers that inspected it. `--detailed` adds absolute timestamps, visit counts, and harness context.
 - `comms thread MESSAGE_ID`: View all ancestors and replies in a thread tree.
 - `comms search QUERY`: Full-text search across messages.
 - `comms observe`: Monitor all live traffic as an operator.
@@ -165,8 +165,13 @@ make check
 # Build local binary to bin/comms
 make build
 
-# Install to $GOPATH/bin
+# Install to $(PREFIX)/bin, default ~/.local/bin
 make install
+
+# Install this checkout over the Homebrew comms so the `comms` on PATH is
+# the dev build, then restore the released one
+make install-local
+make use-homebrew
 ```
 
 ---

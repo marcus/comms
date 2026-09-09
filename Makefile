@@ -7,8 +7,9 @@ LDFLAGS := -X $(PKG)/pkg/buildinfo.Version=$(VERSION) \
            -X $(PKG)/pkg/buildinfo.Commit=$(COMMIT)
 BIN     := bin
 PREFIX  ?= $(HOME)/.local
+BREW_PREFIX ?= $(shell brew --prefix 2>/dev/null)
 
-.PHONY: all build install uninstall test cover lint fmt fmt-check tidy vet check clean \
+.PHONY: all build install install-local use-homebrew uninstall test cover lint fmt fmt-check tidy vet check clean \
 	release-snapshot release-verify release release-dry-run release-tap release-check-state
 
 all: check
@@ -20,6 +21,23 @@ install: build
 	@mkdir -p '$(PREFIX)/bin'
 	install -m 0755 '$(BIN)/comms' '$(PREFIX)/bin/comms'
 	@echo "installed comms -> $(PREFIX)/bin/comms"
+
+# install-local puts this checkout's build where the Homebrew comms lives, so
+# the `comms` already on PATH is the dev build and no shell configuration
+# changes. It unlinks the formula first so Homebrew does not fight the file;
+# use-homebrew puts the released binary back.
+install-local: build
+	@test -n '$(BREW_PREFIX)' || { echo "Homebrew not found; use 'make install' and put $(PREFIX)/bin on PATH"; exit 1; }
+	@brew unlink comms >/dev/null 2>&1 || true
+	install -m 0755 '$(BIN)/comms' '$(BREW_PREFIX)/bin/comms'
+	@echo "installed dev comms -> $(BREW_PREFIX)/bin/comms"
+	@echo "restart the daemon with 'comms restart'; restore the release with 'make use-homebrew'"
+
+use-homebrew:
+	@test -n '$(BREW_PREFIX)' || { echo "Homebrew not found"; exit 1; }
+	rm -f '$(BREW_PREFIX)/bin/comms'
+	brew link --overwrite comms
+	@echo "restored the Homebrew comms; restart the daemon with 'comms restart'"
 
 uninstall:
 	rm -f '$(PREFIX)/bin/comms'

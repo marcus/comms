@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcus/comms/internal/app"
+	"github.com/marcus/comms/internal/help"
 	"github.com/marcus/comms/internal/httpapi"
 	"github.com/marcus/comms/internal/service"
 )
@@ -528,4 +530,34 @@ func waitForHello(t *testing.T, socket string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("hello not ready: %v", last)
+}
+
+func TestReplacingAServiceToleratesAnOlderSchemaButNotANewerOne(t *testing.T) {
+	older := help.Handshake{Handshake: app.Handshake{ProtocolVersion: app.ProtocolVersion, SchemaVersion: app.SchemaVersion - 1}}
+	newer := help.Handshake{Handshake: app.Handshake{ProtocolVersion: app.ProtocolVersion, SchemaVersion: app.SchemaVersion + 1}}
+	current := help.Handshake{Handshake: app.Handshake{ProtocolVersion: app.ProtocolVersion, SchemaVersion: app.SchemaVersion}}
+	otherProtocol := help.Handshake{Handshake: app.Handshake{ProtocolVersion: app.ProtocolVersion + 1, SchemaVersion: app.SchemaVersion}}
+
+	// Stopping an older service is how an upgrade proceeds, so it must not be
+	// the one thing an upgraded client cannot do.
+	if err := checkReplaceableCompatibility(older); err != nil {
+		t.Fatalf("replacing an older service: %v", err)
+	}
+	if err := gateFor(replaceAuto, older); err != nil {
+		t.Fatalf("auto replacement of an older service: %v", err)
+	}
+	if err := checkReplaceableCompatibility(current); err != nil {
+		t.Fatalf("replacing a current service: %v", err)
+	}
+	// A newer database is one this client could not open afterwards.
+	if err := checkReplaceableCompatibility(newer); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("replacing a newer service: %v", err)
+	}
+	if err := checkReplaceableCompatibility(otherProtocol); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("replacing a different protocol: %v", err)
+	}
+	// An ordinary command still refuses to talk to a service it does not match.
+	if err := gateFor(replaceNone, older); !errors.Is(err, app.ErrConflict) {
+		t.Fatalf("ordinary command against an older service: %v", err)
+	}
 }

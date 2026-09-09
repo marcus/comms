@@ -26,6 +26,11 @@
   `body_truncated`, in pages of 20 rather than 50. Pass `--full` or
   `?full=true` for complete bodies. `wait` still returns full bodies. An agent
   that read whole bodies from the inbox must now ask for them.
+- `comms stop` and `comms restart` can now replace a running service whose
+  schema is older than the client's. Refusing there made the two commands an
+  upgrade needs the two an upgrade could not run; every other command
+  still refuses to talk to a service it does not match, and a service whose
+  schema is *newer* than the client is still refused everywhere.
 - **Breaking (rollback):** the store schema moves to version 2 and the
   migration runner now applies every embedded migration in order. An older
   comms binary refuses to open a version 2 database, so rolling the binary back

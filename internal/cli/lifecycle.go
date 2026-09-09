@@ -230,10 +230,11 @@ func (r *runner) ensureReady(client *httpapi.Client) error {
 	ctx := r.readyContext()
 	hs, err := handshake(ctx, client)
 	if err == nil {
-		if err := checkHandshakeCompatibility(hs); err != nil {
+		decision := r.lifecycleDecision(hs)
+		if err := gateFor(decision, hs); err != nil {
 			return err
 		}
-		switch r.lifecycleDecision(hs) {
+		switch decision {
 		case replaceNone:
 			return nil
 		case replaceLegacy:
@@ -272,10 +273,11 @@ func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, lo
 		}
 		hs, err := handshake(ctx, client)
 		if err == nil {
-			if err := checkHandshakeCompatibility(hs); err != nil {
+			decision := r.lifecycleDecision(hs)
+			if err := gateFor(decision, hs); err != nil {
 				return err
 			}
-			switch r.lifecycleDecision(hs) {
+			switch decision {
 			case replaceNone:
 				return nil
 			case replaceLegacy:
@@ -329,6 +331,30 @@ func checkHandshakeCompatibility(hs help.Handshake) error {
 		return fmt.Errorf("%w: incompatible schema version %d (client supports %d)", app.ErrConflict, hs.SchemaVersion, app.SchemaVersion)
 	}
 	return nil
+}
+
+// checkReplaceableCompatibility gates a client that is about to stop a running
+// service rather than talk to it. An older schema is the reason to replace the
+// process, not a reason to refuse: refusing there would make stop and restart
+// the two commands an upgrade cannot use. A newer schema still refuses, because
+// this client cannot open that database afterwards.
+func checkReplaceableCompatibility(hs help.Handshake) error {
+	if hs.ProtocolVersion != app.ProtocolVersion {
+		return fmt.Errorf("%w: incompatible protocol version %d (client supports %d)", app.ErrConflict, hs.ProtocolVersion, app.ProtocolVersion)
+	}
+	if hs.SchemaVersion > app.SchemaVersion {
+		return fmt.Errorf("%w: database schema %d is newer than supported %d", app.ErrConflict, hs.SchemaVersion, app.SchemaVersion)
+	}
+	return nil
+}
+
+// gateFor applies the compatibility rule that matches what the client is about
+// to do: talk to the service, or replace it.
+func gateFor(decision replaceAction, hs help.Handshake) error {
+	if decision == replaceAuto {
+		return checkReplaceableCompatibility(hs)
+	}
+	return checkHandshakeCompatibility(hs)
 }
 
 func (r *runner) lifecycleDecision(hs help.Handshake) replaceAction {
@@ -720,7 +746,7 @@ func (r *runner) stopService(client *httpapi.Client) (didStop bool, err error) {
 		}
 		return false, err
 	}
-	if err := checkHandshakeCompatibility(hs); err != nil {
+	if err := checkReplaceableCompatibility(hs); err != nil {
 		return false, err
 	}
 	if err := r.stoppableHandshake(hs); err != nil {
@@ -744,7 +770,7 @@ func (r *runner) stopService(client *httpapi.Client) (didStop bool, err error) {
 			}
 			return false, err
 		}
-		if err := checkHandshakeCompatibility(hs); err != nil {
+		if err := checkReplaceableCompatibility(hs); err != nil {
 			return false, err
 		}
 		if err := r.stoppableHandshake(hs); err != nil {
