@@ -687,6 +687,11 @@ func (h *Handler) export(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	for _, x := range v.Retrievals {
+		if !write("message_retrieval", x) {
+			return
+		}
+	}
 }
 
 func (h *Handler) requireAgent(w http.ResponseWriter, r *http.Request) (string, bool) {

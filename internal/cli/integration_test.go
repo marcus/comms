@@ -65,10 +65,10 @@ func TestBlackBoxThreeSessionConversation(t *testing.T) {
 		t.Fatalf("gamma inbox has %d messages, want 2", len(items))
 	}
 	runJSON(t, socket, map[string]string{"COMMS_CONTEXT": beta}, "read-through", rootID)
-	receipts := runJSONArray(t, socket, nil, "receipts", rootID)
+	receipts := runJSON(t, socket, nil, "receipts", rootID)
 	foundRead := false
-	for _, receipt := range receipts {
-		if receipt["state"] == "read" {
+	for _, receipt := range arrayValue(t, receipts, "subscribers") {
+		if receipt.(map[string]any)["state"] == "read" {
 			foundRead = true
 		}
 	}
@@ -140,23 +140,6 @@ func runJSONWithStdin(t *testing.T, socket string, environment map[string]string
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode %v output %q: %v", args, stdout.String(), err)
-	}
-	return envelope.Data
-}
-
-func runJSONArray(t *testing.T, socket string, environment map[string]string, args ...string) []map[string]any {
-	t.Helper()
-	var stdout, stderr bytes.Buffer
-	full := append([]string{"--socket", socket, "--json"}, args...)
-	code := Run(Env{Args: full, Stdout: &stdout, Stderr: &stderr, Getenv: func(key string) string { return environment[key] }})
-	if code != 0 {
-		t.Fatalf("comms %v: code=%d stderr=%s", args, code, stderr.String())
-	}
-	var envelope struct {
-		Data []map[string]any `json:"data"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
-		t.Fatal(err)
 	}
 	return envelope.Data
 }

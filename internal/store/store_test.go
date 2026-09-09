@@ -115,8 +115,11 @@ func TestConversationReceiptsAndIdempotency(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(receipts) != 1 || receipts[0].Agent.ID != bob.ID || receipts[0].State != "read" || receipts[0].ReadAt == nil {
+	if len(receipts.Subscribers) != 1 || receipts.Subscribers[0].Agent.ID != bob.ID || receipts.Subscribers[0].State != "read" || receipts.Subscribers[0].ReadAt == nil {
 		t.Fatalf("receipts=%#v", receipts)
+	}
+	if len(receipts.Inspectors) != 0 {
+		t.Fatalf("unrecorded reads produced inspectors: %#v", receipts.Inspectors)
 	}
 	reply, e := sys.service.Reply(ctx, app.ReplyRequest{Author: "bob", Parent: string(root.ID), Body: "confirmed"})
 	if e != nil {
@@ -247,7 +250,7 @@ func TestRecentContextRefollowAliasExpiryAndFormerReceipt(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(receipts) != 2 || receipts[0].Agent.ID != bob.ID || receipts[0].State != "read" || receipts[1].Agent.ID != carol.ID || receipts[1].State != "unread" {
+	if len(receipts.Subscribers) != 2 || receipts.Subscribers[0].Agent.ID != bob.ID || receipts.Subscribers[0].State != "read" || receipts.Subscribers[1].Agent.ID != carol.ID || receipts.Subscribers[1].State != "unread" {
 		t.Fatalf("active/former receipts=%#v", receipts)
 	}
 	third, e := sys.service.Publish(ctx, app.PublishRequest{Author: "alice", Topic: "history", Title: "three", Body: "body"})

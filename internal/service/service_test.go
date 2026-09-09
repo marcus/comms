@@ -141,7 +141,7 @@ func TestHandshakeIncludesLifecycleFields(t *testing.T) {
 	if hs.Commit != buildinfo.Commit || hs.ServerVersion != buildinfo.Version {
 		t.Fatalf("build identity=%#v", hs)
 	}
-	if hs.StoreID == "" || hs.ProtocolVersion != app.ProtocolVersion || hs.SchemaVersion != 1 {
+	if hs.StoreID == "" || hs.ProtocolVersion != app.ProtocolVersion || hs.SchemaVersion != app.SchemaVersion {
 		t.Fatalf("store handshake=%#v", hs)
 	}
 	if time.Since(hs.StartedAt) > time.Minute || hs.StartedAt.After(time.Now().UTC().Add(time.Second)) {

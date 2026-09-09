@@ -64,7 +64,7 @@ func (a *Adapter) Purge(ctx context.Context, req app.PurgeRequest, id domain.Pur
 }
 
 func (a *Adapter) Snapshot(ctx context.Context) (app.Snapshot, error) {
-	out := app.Snapshot{StoreID: a.storeID, Agents: []domain.Agent{}, Aliases: []app.AliasRecord{}, AgentExternalRefs: []app.ExternalAgentRefRecord{}, Topics: []domain.Topic{}, TopicExternalRefs: []app.ExternalTopicRefRecord{}, Subscriptions: []domain.Subscription{}, Messages: []domain.Message{}}
+	out := app.Snapshot{StoreID: a.storeID, Agents: []domain.Agent{}, Aliases: []app.AliasRecord{}, AgentExternalRefs: []app.ExternalAgentRefRecord{}, Topics: []domain.Topic{}, TopicExternalRefs: []app.ExternalTopicRefRecord{}, Subscriptions: []domain.Subscription{}, Messages: []domain.Message{}, Retrievals: []app.RetrievalRecord{}}
 	rows, e := a.read.QueryContext(ctx, "SELECT "+agentCols+" FROM agents ORDER BY id")
 	if e != nil {
 		return out, e
@@ -158,6 +158,26 @@ func (a *Adapter) Snapshot(ctx context.Context) (app.Snapshot, error) {
 			return out, e
 		}
 		out.Messages = append(out.Messages, v)
+	}
+	if e = rows.Close(); e != nil {
+		return out, e
+	}
+	rows, e = a.read.QueryContext(ctx, "SELECT message_id,agent_id,first_seen_at,last_seen_at,first_inspected_at,seen_count FROM message_retrievals ORDER BY message_id,agent_id")
+	if e != nil {
+		return out, e
+	}
+	for rows.Next() {
+		var v app.RetrievalRecord
+		var first, last int64
+		var inspected sql.NullInt64
+		if e = rows.Scan(&v.MessageID, &v.AgentID, &first, &last, &inspected, &v.SeenCount); e != nil {
+			_ = rows.Close()
+			return out, e
+		}
+		v.FirstSeenAt = timeFrom(first)
+		v.LastSeenAt = timeFrom(last)
+		v.FirstInspectedAt = nullableTime(inspected)
+		out.Retrievals = append(out.Retrievals, v)
 	}
 	if e = rows.Close(); e != nil {
 		return out, e

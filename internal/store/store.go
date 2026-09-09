@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +29,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type Options struct {
 	Path            string
@@ -172,59 +173,126 @@ func acquireOwner(path string) (*os.File, error) {
 	}
 	return f, nil
 }
-func migrate(ctx context.Context, db *sql.DB) error {
+
+// migration is one embedded schema step. Files are named NNN_description.sql
+// and applied in version order, so adding a file is the whole change.
+type migration struct {
+	version int
+	body    string
+}
+
+// embeddedMigrations returns every embedded migration in version order and
+// refuses a catalog that would leave the schema ambiguous: a malformed name, a
+// gap or duplicate in the sequence, or a highest version that disagrees with
+// the schemaVersion this binary claims to speak.
+func embeddedMigrations() ([]migration, error) {
+	entries, e := migrationFiles.ReadDir("migrations")
+	if e != nil {
+		return nil, e
+	}
+	out := make([]migration, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") {
+			continue
+		}
+		prefix, _, found := strings.Cut(name, "_")
+		version, convErr := strconv.Atoi(prefix)
+		if !found || convErr != nil || version <= 0 {
+			return nil, fmt.Errorf("migration %q must be named NNN_description.sql", name)
+		}
+		body, e := migrationFiles.ReadFile("migrations/" + name)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, migration{version: version, body: string(body)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].version < out[j].version })
+	for i, m := range out {
+		if m.version != i+1 {
+			return nil, fmt.Errorf("migration versions must run contiguously from 1; found %d at position %d", m.version, i+1)
+		}
+	}
+	if len(out) == 0 || out[len(out)-1].version != schemaVersion {
+		return nil, fmt.Errorf("highest embedded migration does not match schema version %d", schemaVersion)
+	}
+	return out, nil
+}
+
+func currentSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var exists int
 	if e := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&exists); e != nil {
+		return 0, e
+	}
+	if exists == 0 {
+		return 0, nil
+	}
+	var current int
+	e := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&current)
+	return current, e
+}
+
+func migrate(ctx context.Context, db *sql.DB) error {
+	migrations, e := embeddedMigrations()
+	if e != nil {
 		return e
 	}
-	if exists > 0 {
-		var current int
-		if e := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&current); e != nil {
-			return e
-		}
-		if current > schemaVersion {
-			return fmt.Errorf("%w: database schema %d is newer than supported %d", app.ErrConflict, current, schemaVersion)
-		}
+	current, e := currentSchemaVersion(ctx, db)
+	if e != nil {
+		return e
 	}
 	// Refuse future schemas before pragmas that can alter the database.
+	if current > schemaVersion {
+		return fmt.Errorf("%w: database schema %d is newer than supported %d", app.ErrConflict, current, schemaVersion)
+	}
 	if _, e := db.ExecContext(ctx, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;"); e != nil {
 		return fmt.Errorf("configure sqlite: %w", e)
 	}
-	if exists > 0 {
-		var current int
-		if e := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&current); e != nil {
+	now := micros(time.Now().UTC())
+	for _, m := range migrations {
+		if m.version <= current {
+			continue
+		}
+		if e := applyMigration(ctx, db, m, now); e != nil {
 			return e
 		}
-		if current == schemaVersion {
-			return nil
-		}
 	}
+	return ensureStoreID(ctx, db)
+}
+
+// applyMigration runs one step and records its version in the same transaction,
+// so a failure leaves the database at the previous version rather than half
+// upgraded.
+func applyMigration(ctx context.Context, db *sql.DB, m migration, now int64) error {
 	tx, e := db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer func() { _ = tx.Rollback() }()
-	if exists == 0 {
-		body, e := migrationFiles.ReadFile("migrations/001_initial.sql")
-		if e != nil {
-			return e
-		}
-		if _, e = tx.ExecContext(ctx, string(body)); e != nil {
-			return fmt.Errorf("migration 1: %w", e)
-		}
+	if _, e = tx.ExecContext(ctx, m.body); e != nil {
+		return fmt.Errorf("migration %d: %w", m.version, e)
 	}
-	now := micros(time.Now().UTC())
-	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,?)", now); e != nil {
+	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)", m.version, now); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
+
+func ensureStoreID(ctx context.Context, db *sql.DB) error {
+	var existing string
+	e := db.QueryRowContext(ctx, "SELECT value FROM store_meta WHERE key='store_id'").Scan(&existing)
+	if e == nil {
+		return nil
+	}
+	if !errors.Is(e, sql.ErrNoRows) {
 		return e
 	}
 	id, e := domain.NewTopicID()
 	if e != nil {
 		return e
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO store_meta(key,value) VALUES('store_id',?)", strings.Replace(string(id), "top_", "sto_", 1)); e != nil {
-		return e
-	}
-	return tx.Commit()
+	_, e = db.ExecContext(ctx, "INSERT OR IGNORE INTO store_meta(key,value) VALUES('store_id',?)", strings.Replace(string(id), "top_", "sto_", 1))
+	return e
 }
 
 func (a *Adapter) runWriter() {

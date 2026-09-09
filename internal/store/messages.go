@@ -469,50 +469,138 @@ func (a *Adapter) ReadThrough(ctx context.Context, req app.ReadThroughRequest, n
 	})
 }
 
-func (a *Adapter) Receipts(ctx context.Context, ref string, now time.Time) ([]app.Receipt, error) {
+// Receipts reports the cursor standing of every relevant subscriber plus the
+// retrieval activity of every identified reader. Subscription membership is
+// judged live here rather than stored on a retrieval row, because follow and
+// unfollow move it after the read happened.
+func (a *Adapter) Receipts(ctx context.Context, ref string, now time.Time) (app.ReceiptReport, error) {
+	out := app.ReceiptReport{Subscribers: []app.Receipt{}, Inspectors: []app.Inspector{}}
 	m, e := resolveMessage(ctx, a.read, ref)
 	if e != nil {
-		return nil, e
+		return out, e
 	}
-	rows, e := a.read.QueryContext(ctx, "SELECT "+prefixedAgentCols("a")+",s.read_through_sequence,(SELECT MIN(r.read_at) FROM subscription_read_advances r WHERE r.agent_id=s.agent_id AND r.topic_id=s.topic_id AND r.through_sequence>=?) FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=? AND s.agent_id<>? AND (s.unfollowed_at IS NULL OR s.read_through_sequence>=?) ORDER BY lower(a.handle),a.id", m.Sequence, m.TopicID, m.AuthorID, m.Sequence)
+	rows, e := a.read.QueryContext(ctx, "SELECT "+prefixedAgentCols("a")+",s.read_through_sequence,(SELECT MIN(r.read_at) FROM subscription_read_advances r WHERE r.agent_id=s.agent_id AND r.topic_id=s.topic_id AND r.through_sequence>=?),mr.first_seen_at,mr.first_inspected_at,mr.seen_count FROM subscriptions s JOIN agents a ON a.id=s.agent_id LEFT JOIN message_retrievals mr ON mr.message_id=? AND mr.agent_id=s.agent_id WHERE s.topic_id=? AND s.agent_id<>? AND (s.unfollowed_at IS NULL OR s.read_through_sequence>=?) ORDER BY lower(a.handle),a.id", m.Sequence, m.ID, m.TopicID, m.AuthorID, m.Sequence)
 	if e != nil {
-		return nil, e
+		return out, e
 	}
 	defer func() { _ = rows.Close() }()
-	out := []app.Receipt{}
 	for rows.Next() {
-		ag := scanAgentWithTrailing(rows)
-		if ag.err != nil {
-			return nil, ag.err
+		var agent domain.Agent
+		var sequence int64
+		var read sql.NullInt64
+		var retrieval retrievalColumns
+		if e := scanAgentPrefix(rows, &agent, append([]any{&sequence, &read}, retrieval.targets()...)...); e != nil {
+			return out, e
 		}
-		state := "unread"
-		var at *time.Time
-		if ag.read.Valid && ag.sequence >= m.Sequence {
-			state = "read"
-			at = nullableTime(ag.read)
+		receipt := app.Receipt{Agent: agent, State: "unread", Retrieval: retrieval.projection()}
+		if read.Valid && sequence >= m.Sequence {
+			receipt.State = "read"
+			receipt.ReadAt = nullableTime(read)
 		}
-		out = append(out, app.Receipt{Agent: ag.agent, State: state, ReadAt: at})
+		out.Subscribers = append(out.Subscribers, receipt)
 	}
-	return out, rows.Err()
+	if e = rows.Err(); e != nil {
+		return out, e
+	}
+	if e = rows.Close(); e != nil {
+		return out, e
+	}
+	inspectors, e := a.read.QueryContext(ctx, "SELECT "+prefixedAgentCols("a")+",mr.first_seen_at,mr.first_inspected_at,mr.seen_count FROM message_retrievals mr JOIN agents a ON a.id=mr.agent_id WHERE mr.message_id=? AND mr.agent_id<>? AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE s.agent_id=mr.agent_id AND s.topic_id=? AND (s.unfollowed_at IS NULL OR s.read_through_sequence>=?)) ORDER BY lower(a.handle),a.id", m.ID, m.AuthorID, m.TopicID, m.Sequence)
+	if e != nil {
+		return out, e
+	}
+	defer func() { _ = inspectors.Close() }()
+	for inspectors.Next() {
+		var agent domain.Agent
+		var retrieval retrievalColumns
+		if e := scanAgentPrefix(inspectors, &agent, retrieval.targets()...); e != nil {
+			return out, e
+		}
+		out.Inspectors = append(out.Inspectors, app.Inspector{Agent: agent, Retrieval: retrieval.projection()})
+	}
+	return out, inspectors.Err()
 }
 
-type agentTrailing struct {
-	agent    domain.Agent
-	sequence int64
-	read     sql.NullInt64
-	err      error
+// retrievalColumns holds the nullable retrieval trailer shared by the
+// subscriber and inspector queries.
+type retrievalColumns struct {
+	seen      sql.NullInt64
+	inspected sql.NullInt64
+	count     sql.NullInt64
 }
 
-func scanAgentWithTrailing(s interface{ Scan(...any) error }) agentTrailing {
-	var x agentTrailing
+func (r *retrievalColumns) targets() []any { return []any{&r.seen, &r.inspected, &r.count} }
+
+func (r retrievalColumns) projection() app.Retrieval {
+	return app.Retrieval{SeenAt: nullableTime(r.seen), InspectedAt: nullableTime(r.inspected), SeenCount: r.count.Int64}
+}
+
+// scanAgentPrefix scans the standard agent column list followed by
+// query-specific trailing columns.
+func scanAgentPrefix(s interface{ Scan(...any) error }, agent *domain.Agent, trailing ...any) error {
 	var created, updated, seen int64
 	var retired sql.NullInt64
-	x.err = s.Scan(&x.agent.ID, &x.agent.Handle, &x.agent.DisplayName, &x.agent.Purpose, &x.agent.Harness, &x.agent.Project, &x.agent.SessionRef, &created, &updated, &seen, &retired, &x.sequence, &x.read)
-	x.agent.CreatedAt = timeFrom(created)
-	x.agent.UpdatedAt = timeFrom(updated)
-	x.agent.LastSeenAt = timeFrom(seen)
-	x.agent.RetiredAt = nullableTime(retired)
-	return x
+	targets := append([]any{&agent.ID, &agent.Handle, &agent.DisplayName, &agent.Purpose, &agent.Harness, &agent.Project, &agent.SessionRef, &created, &updated, &seen, &retired}, trailing...)
+	if e := s.Scan(targets...); e != nil {
+		return e
+	}
+	agent.CreatedAt = timeFrom(created)
+	agent.UpdatedAt = timeFrom(updated)
+	agent.LastSeenAt = timeFrom(seen)
+	agent.RetiredAt = nullableTime(retired)
+	return nil
+}
+
+const retrievalUpsert = "INSERT INTO message_retrievals(message_id,agent_id,first_seen_at,last_seen_at,first_inspected_at,seen_count)" +
+	" SELECT m.id,?,?,?,?,1 FROM messages m WHERE m.id=? AND m.author_id<>?" +
+	" ON CONFLICT(message_id,agent_id) DO UPDATE SET" +
+	" first_seen_at=MIN(message_retrievals.first_seen_at,excluded.first_seen_at)," +
+	" last_seen_at=MAX(message_retrievals.last_seen_at,excluded.last_seen_at)," +
+	" first_inspected_at=CASE" +
+	"  WHEN message_retrievals.first_inspected_at IS NULL THEN excluded.first_inspected_at" +
+	"  WHEN excluded.first_inspected_at IS NULL THEN message_retrievals.first_inspected_at" +
+	"  ELSE MIN(message_retrievals.first_inspected_at,excluded.first_inspected_at) END," +
+	" seen_count=message_retrievals.seen_count+1"
+
+// RecordRetrievals writes one coalesced batch of retrieval observations. Agent
+// references are resolved inside the transaction and unknown ones are skipped
+// rather than failing the batch, because a read must never fail because its
+// bookkeeping could not be attributed. A message the reader wrote is skipped by
+// the statement itself, as is a message that no longer exists.
+func (a *Adapter) RecordRetrievals(ctx context.Context, events []app.RetrievalEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	_, e := withMutation(ctx, a, app.Mutation{}, "record_retrievals", time.Now().UTC(), func(tx *sql.Tx) (struct{}, error) {
+		resolved := make(map[string]domain.AgentID, len(events))
+		for _, event := range events {
+			id, known := resolved[event.Agent]
+			if !known {
+				agent, e := resolveAgent(ctx, tx, event.Agent, event.At)
+				switch {
+				case errors.Is(e, app.ErrNotFound):
+					resolved[event.Agent] = ""
+					continue
+				case e != nil:
+					return struct{}{}, e
+				}
+				id = agent.ID
+				resolved[event.Agent] = id
+			}
+			if id == "" {
+				continue
+			}
+			var inspected any
+			if event.Depth == app.RetrievalFull {
+				inspected = micros(event.At)
+			}
+			if _, e := tx.ExecContext(ctx, retrievalUpsert, id, micros(event.At), micros(event.At), inspected, event.MessageID, id); e != nil {
+				return struct{}{}, e
+			}
+		}
+		return struct{}{}, nil
+	})
+	return e
 }
 
 func (a *Adapter) Search(ctx context.Context, req app.SearchRequest, now time.Time) (app.Page[domain.Message], error) {

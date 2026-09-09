@@ -14,7 +14,7 @@ import (
 
 const (
 	ProtocolVersion = 1
-	SchemaVersion   = 1
+	SchemaVersion   = 2
 	DefaultLimit    = 50
 	MaxLimit        = 500
 )
@@ -311,10 +311,75 @@ type ReadThroughResponse struct {
 	NewSequence       int64               `json:"new_sequence"`
 	NewlyAcknowledged int64               `json:"newly_acknowledged"`
 }
+
+// RetrievalDepth records how much of a message reached an identified agent.
+// Preview is a lean inbox listing; Full is a complete body returned by peek,
+// thread, wait, topic history, search, or an explicitly full inbox. Neither is
+// an acknowledgment: only read-through advances a subscription cursor.
+type RetrievalDepth string
+
+const (
+	RetrievalPreview RetrievalDepth = "preview"
+	RetrievalFull    RetrievalDepth = "full"
+)
+
+// Deeper reports whether d carries more of the message than other.
+func (d RetrievalDepth) Deeper(other RetrievalDepth) bool {
+	return d == RetrievalFull && other != RetrievalFull
+}
+
+// RetrievalEvent is one coalesced observation that a message reached an agent.
+// Agent is the reader's reference as supplied by the transport; the store
+// resolves it to a stable ID and skips references it cannot resolve.
+type RetrievalEvent struct {
+	MessageID domain.MessageID `json:"message_id"`
+	Agent     string           `json:"agent"`
+	Depth     RetrievalDepth   `json:"depth"`
+	At        time.Time        `json:"at"`
+}
+
+// RetrievalRecord is the stored per-message, per-agent retrieval row. It is
+// diagnostic output only; it dies with its message.
+type RetrievalRecord struct {
+	MessageID        domain.MessageID `json:"message_id"`
+	AgentID          domain.AgentID   `json:"agent_id"`
+	FirstSeenAt      time.Time        `json:"first_seen_at"`
+	LastSeenAt       time.Time        `json:"last_seen_at"`
+	FirstInspectedAt *time.Time       `json:"first_inspected_at,omitempty"`
+	SeenCount        int64            `json:"seen_count"`
+}
+
+// Retrieval is the per-agent retrieval projection shared by subscriber
+// receipts and inspectors. Its fields are omitted when the agent has no
+// retrieval row at all.
+type Retrieval struct {
+	SeenAt      *time.Time `json:"seen_at,omitempty"`
+	InspectedAt *time.Time `json:"inspected_at,omitempty"`
+	SeenCount   int64      `json:"seen_count,omitempty"`
+}
+
+// Receipt is one relevant subscriber's standing on a message. State stays the
+// cursor fact; retrieval depth is a separate dimension a client derives from
+// InspectedAt and SeenAt.
 type Receipt struct {
 	Agent  domain.Agent `json:"agent"`
 	State  string       `json:"state"`
 	ReadAt *time.Time   `json:"read_at,omitempty"`
+	Retrieval
+}
+
+// Inspector is an identified reader of a message that is neither its author
+// nor a relevant subscriber: an orchestrator or monitor that peeked.
+type Inspector struct {
+	Agent domain.Agent `json:"agent"`
+	Retrieval
+}
+
+// ReceiptReport is the receipts payload. It is an object rather than a bare
+// list because inspectors are a second, differently shaped population.
+type ReceiptReport struct {
+	Subscribers []Receipt   `json:"subscribers"`
+	Inspectors  []Inspector `json:"inspectors"`
 }
 type SearchRequest struct {
 	PageRequest
@@ -367,6 +432,7 @@ type Snapshot struct {
 	TopicExternalRefs []ExternalTopicRefRecord `json:"topic_external_refs"`
 	Subscriptions     []domain.Subscription    `json:"subscriptions"`
 	Messages          []domain.Message         `json:"messages"`
+	Retrievals        []RetrievalRecord        `json:"retrievals"`
 }
 type DoctorReport struct {
 	Healthy bool              `json:"healthy"`
@@ -399,7 +465,8 @@ type MessageStore interface {
 	Thread(context.Context, ThreadRequest, time.Time) (Page[domain.Message], error)
 	Peek(context.Context, string, time.Time) (domain.Message, error)
 	ReadThrough(context.Context, ReadThroughRequest, time.Time) (ReadThroughResponse, error)
-	Receipts(context.Context, string, time.Time) ([]Receipt, error)
+	Receipts(context.Context, string, time.Time) (ReceiptReport, error)
+	RecordRetrievals(context.Context, []RetrievalEvent) error
 	Search(context.Context, SearchRequest, time.Time) (Page[domain.Message], error)
 	Observe(context.Context, ObserveRequest, time.Time) (Page[domain.Message], error)
 	ResolveWait(context.Context, MessageWaitRequest, time.Time) (ResolvedWait, error)
@@ -838,9 +905,9 @@ func (s *Service) ReadThrough(ctx context.Context, req ReadThroughRequest) (Read
 	}
 	return s.messageStore.ReadThrough(ctx, req, s.clock.Now())
 }
-func (s *Service) Receipts(ctx context.Context, message string) ([]Receipt, error) {
+func (s *Service) Receipts(ctx context.Context, message string) (ReceiptReport, error) {
 	if message == "" {
-		return nil, requiredErr("message")
+		return ReceiptReport{}, requiredErr("message")
 	}
 	return s.messageStore.Receipts(ctx, message, s.clock.Now())
 }
