@@ -527,7 +527,7 @@ func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self")})
+	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self"), Full: boolQuery(r, "full")})
 	h.respond(w, v, e)
 }
 func (h *Handler) waitAgent(w http.ResponseWriter, r *http.Request) {
@@ -572,7 +572,7 @@ func (h *Handler) topicMessages(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.TopicMessages(r.Context(), app.MessageListRequest{PageRequest: p, Topic: r.PathValue("topic"), Latest: boolQuery(r, "latest")})
+	v, e := h.app.TopicMessages(r.Context(), app.MessageListRequest{PageRequest: p, Topic: r.PathValue("topic"), Latest: boolQuery(r, "latest"), Agent: h.reader(r)})
 	h.respond(w, v, e)
 }
 func (h *Handler) thread(w http.ResponseWriter, r *http.Request) {
@@ -581,11 +581,11 @@ func (h *Handler) thread(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Thread(r.Context(), app.ThreadRequest{PageRequest: p, Message: r.PathValue("message"), Latest: boolQuery(r, "latest")})
+	v, e := h.app.Thread(r.Context(), app.ThreadRequest{PageRequest: p, Message: r.PathValue("message"), Latest: boolQuery(r, "latest"), Agent: h.reader(r)})
 	h.respond(w, v, e)
 }
 func (h *Handler) peek(w http.ResponseWriter, r *http.Request) {
-	v, e := h.app.Peek(r.Context(), r.PathValue("message"))
+	v, e := h.app.Peek(r.Context(), app.PeekRequest{Message: r.PathValue("message"), Agent: h.reader(r)})
 	h.respond(w, v, e)
 }
 func (h *Handler) readThrough(w http.ResponseWriter, r *http.Request) {
@@ -610,7 +610,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Search(r.Context(), app.SearchRequest{PageRequest: p, Query: r.URL.Query().Get("query"), From: r.URL.Query().Get("from"), Topic: r.URL.Query().Get("topic")})
+	v, e := h.app.Search(r.Context(), app.SearchRequest{PageRequest: p, Query: r.URL.Query().Get("query"), From: r.URL.Query().Get("from"), Topic: r.URL.Query().Get("topic"), Agent: h.reader(r)})
 	h.respond(w, v, e)
 }
 func (h *Handler) observe(w http.ResponseWriter, r *http.Request) {
@@ -692,6 +692,12 @@ func (h *Handler) export(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// reader returns the optional caller identity for read routes that do not
+// require one. It attributes retrieval; it never filters or authorizes.
+func (h *Handler) reader(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get(AgentHeader))
 }
 
 func (h *Handler) requireAgent(w http.ResponseWriter, r *http.Request) (string, bool) {

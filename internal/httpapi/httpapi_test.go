@@ -567,3 +567,85 @@ func TestTopicMessagesAndThreadLatestNavigation(t *testing.T) {
 		t.Fatalf("thread items = %#v", docThread.Data.Items)
 	}
 }
+
+func TestInboxPreviewsBodiesUnlessFullIsRequested(t *testing.T) {
+	adapter, err := store.Open(context.Background(), store.Options{Path: filepath.Join(t.TempDir(), "comms.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adapter.Close() })
+	svc := app.NewService(adapter, domain.UTCClock{})
+	t.Cleanup(func() { _ = svc.Close() })
+	server := httptest.NewServer(NewHandler(svc))
+	t.Cleanup(server.Close)
+
+	ctx := context.Background()
+	if _, err = svc.Join(ctx, app.JoinRequest{Handle: "sender"}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := svc.Join(ctx, app.JoinRequest{Handle: "reader"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.CreateTopic(ctx, app.CreateTopicRequest{Name: "stream"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, handle := range []string{"sender", "reader"} {
+		if _, err = svc.Follow(ctx, app.FollowRequest{Agent: handle, Topic: "stream"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := "Headline only\n\n" + strings.Repeat("detail ", 100)
+	message, err := svc.Publish(ctx, app.PublishRequest{Author: "sender", Topic: "stream", Title: "note", Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(query string) []map[string]any {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodGet, server.URL+"/v1/inbox"+query, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set(AgentHeader, string(reader.Agent.ID))
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d", response.StatusCode)
+		}
+		var doc struct {
+			Data struct {
+				Items []map[string]any `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Data.Items
+	}
+
+	items := get("")
+	if len(items) != 1 || items[0]["body"] != "Headline only" || items[0]["body_truncated"] != true {
+		t.Fatalf("preview items=%#v", items)
+	}
+	items = get("?full=true")
+	if len(items) != 1 || items[0]["body"] != body {
+		t.Fatalf("full items=%#v", items)
+	}
+	if _, present := items[0]["body_truncated"]; present {
+		t.Fatalf("full body carried a truncation marker: %#v", items[0])
+	}
+
+	// Reading the inbox records the reader without acknowledging anything.
+	svc.Retrievals().Flush()
+	report, err := svc.Receipts(ctx, string(message.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Subscribers) != 1 || report.Subscribers[0].State != "unread" || report.Subscribers[0].SeenAt == nil || report.Subscribers[0].InspectedAt == nil {
+		t.Fatalf("receipts after preview and full inbox=%#v", report)
+	}
+}

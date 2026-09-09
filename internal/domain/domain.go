@@ -231,6 +231,10 @@ type Message struct {
 	CreatedAt     time.Time       `json:"created_at"`
 	ExpiresAt     *time.Time      `json:"expires_at,omitempty"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	// BodyTruncated marks a projection whose Body is a preview rather than the
+	// stored body. It is set by lean listings, never persisted, and absent
+	// whenever the full body was returned.
+	BodyTruncated bool `json:"body_truncated,omitempty"`
 }
 
 func (m Message) Validate(reply bool) error {

@@ -17,6 +17,12 @@ const (
 	SchemaVersion   = 2
 	DefaultLimit    = 50
 	MaxLimit        = 500
+	// InboxDefaultLimit keeps the attention surface small. The inbox is
+	// triaged, not read: an agent scans previews and peeks what it will act on.
+	InboxDefaultLimit = 20
+	// InboxPreviewLimit is the maximum number of runes an inbox body preview
+	// keeps before it is marked truncated.
+	InboxPreviewLimit = 160
 )
 
 var (
@@ -249,6 +255,10 @@ type MessageListRequest struct {
 	// export are unaffected.
 	IncludeSelf bool `json:"include_self,omitempty"`
 	Latest      bool `json:"latest,omitempty"`
+	// Full asks a lean listing for complete bodies. Inbox previews by default
+	// so an inbox check costs a headline rather than every diff and log it
+	// carries; every other listing already returns full bodies.
+	Full bool `json:"full,omitempty"`
 }
 
 // Wait timeouts are always bounded. A caller may shorten the default but may
@@ -299,6 +309,15 @@ type ThreadRequest struct {
 	PageRequest
 	Message string `json:"message"`
 	Latest  bool   `json:"latest,omitempty"`
+	// Agent is the reader's identity, not a filter. It is optional and exists
+	// so a full-body read can be attributed; an unknown reference is ignored.
+	Agent string `json:"agent,omitempty"`
+}
+
+// PeekRequest inspects one message. Agent is the optional reader identity.
+type PeekRequest struct {
+	Message string `json:"message"`
+	Agent   string `json:"agent,omitempty"`
 }
 type ReadThroughRequest struct {
 	Mutation
@@ -386,6 +405,8 @@ type SearchRequest struct {
 	Query string `json:"query"`
 	From  string `json:"from,omitempty"`
 	Topic string `json:"topic,omitempty"`
+	// Agent is the reader's identity, not an author filter; From filters.
+	Agent string `json:"agent,omitempty"`
 }
 type ObserveRequest struct {
 	PageRequest
@@ -494,6 +515,7 @@ type Service struct {
 	clock         domain.Clock
 	agentEvents   Notifier
 	messageEvents Notifier
+	retrievals    *RetrievalRecorder
 }
 
 // AgentEvents and MessageEvents expose the service's own change signals. Every
@@ -512,8 +534,21 @@ func NewServiceWithStores(agents AgentStore, topics TopicStore, messages Message
 	if clock == nil {
 		clock = domain.UTCClock{}
 	}
-	return &Service{agents: agents, topics: topics, messageStore: messages, maintenance: maintenance, clock: clock}
+	service := &Service{agents: agents, topics: topics, messageStore: messages, maintenance: maintenance, clock: clock}
+	if messages != nil {
+		service.retrievals = NewRetrievalRecorder(messages, clock)
+	}
+	return service
 }
+
+// Retrievals exposes the recorder so a process can drain it and a test can make
+// it synchronous. It is nil when the service was assembled without a message
+// store; every recorder method tolerates that.
+func (s *Service) Retrievals() *RetrievalRecorder { return s.retrievals }
+
+// Close drains recorded retrievals. It must run before the store closes, and is
+// idempotent.
+func (s *Service) Close() error { return s.retrievals.Close() }
 func (s *Service) Handshake(ctx context.Context) (Handshake, error) {
 	return s.maintenance.Handshake(ctx)
 }
@@ -736,13 +771,75 @@ func (s *Service) Inbox(ctx context.Context, req MessageListRequest) (Page[domai
 	if req.Agent == "" {
 		return Page[domain.Message]{}, requiredErr("agent")
 	}
-	return s.listMessages(ctx, req, s.messageStore.Inbox)
+	if req.Limit == 0 {
+		req.Limit = InboxDefaultLimit
+	}
+	page, err := s.listMessages(ctx, req, s.messageStore.Inbox)
+	if err != nil {
+		return page, err
+	}
+	if req.Full {
+		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
+		return page, nil
+	}
+	for i := range page.Items {
+		if preview, cut := PreviewBody(page.Items[i].Body); cut {
+			page.Items[i].Body = preview
+			page.Items[i].BodyTruncated = true
+		}
+	}
+	s.retrievals.Observe(req.Agent, RetrievalPreview, page.Items)
+	return page, nil
+}
+
+// PreviewBody trims a body to its lead paragraph and then to
+// InboxPreviewLimit runes, reporting whether anything was cut. It splits on
+// rune boundaries, so a preview is always valid UTF-8.
+func PreviewBody(body string) (string, bool) {
+	preview := capRunes(strings.TrimRight(leadParagraph(body), " \t\r\n"), InboxPreviewLimit)
+	// Trailing whitespace alone is not a cut: the body still arrived whole.
+	if preview == strings.TrimRight(body, " \t\r\n") {
+		return body, false
+	}
+	return preview, true
+}
+
+// leadParagraph returns the text before the first blank line, which is where a
+// message stops being a headline and starts being detail.
+func leadParagraph(body string) string {
+	consumed := 0
+	for consumed < len(body) {
+		end := strings.IndexByte(body[consumed:], '\n')
+		if end < 0 {
+			break
+		}
+		if consumed > 0 && strings.TrimSpace(body[consumed:consumed+end]) == "" {
+			return body[:consumed-1]
+		}
+		consumed += end + 1
+	}
+	return body
+}
+
+func capRunes(text string, limit int) string {
+	count := 0
+	for offset := range text {
+		if count == limit {
+			return text[:offset]
+		}
+		count++
+	}
+	return text
 }
 func (s *Service) TopicMessages(ctx context.Context, req MessageListRequest) (Page[domain.Message], error) {
 	if req.Topic == "" {
 		return Page[domain.Message]{}, requiredErr("topic")
 	}
-	return s.listMessages(ctx, req, s.messageStore.TopicMessages)
+	page, err := s.listMessages(ctx, req, s.messageStore.TopicMessages)
+	if err == nil {
+		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
+	}
+	return page, err
 }
 func (s *Service) listMessages(ctx context.Context, req MessageListRequest, fn func(context.Context, MessageListRequest, time.Time) (Page[domain.Message], error)) (Page[domain.Message], error) {
 	p, e := req.normalized()
@@ -761,7 +858,11 @@ func (s *Service) Thread(ctx context.Context, req ThreadRequest) (Page[domain.Me
 		return Page[domain.Message]{}, requiredErr("message")
 	}
 	req.PageRequest = p
-	return s.messageStore.Thread(ctx, req, s.clock.Now())
+	page, err := s.messageStore.Thread(ctx, req, s.clock.Now())
+	if err == nil {
+		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
+	}
+	return page, err
 }
 
 // WaitForAgent blocks until ref resolves to an active agent and returns it.
@@ -849,6 +950,7 @@ func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (
 		}
 		if len(result.Items) != 0 {
 			result.Filter = resolved
+			s.retrievals.Observe(req.Agent, RetrievalFull, result.Items)
 			return result, nil
 		}
 		select {
@@ -890,11 +992,15 @@ func (waitTimeout) Is(target error) bool {
 	return target == context.DeadlineExceeded
 }
 
-func (s *Service) Peek(ctx context.Context, message string) (domain.Message, error) {
-	if message == "" {
+func (s *Service) Peek(ctx context.Context, req PeekRequest) (domain.Message, error) {
+	if req.Message == "" {
 		return domain.Message{}, requiredErr("message")
 	}
-	return s.messageStore.Peek(ctx, message, s.clock.Now())
+	message, err := s.messageStore.Peek(ctx, req.Message, s.clock.Now())
+	if err == nil {
+		s.retrievals.Observe(req.Agent, RetrievalFull, []domain.Message{message})
+	}
+	return message, err
 }
 func (s *Service) ReadThrough(ctx context.Context, req ReadThroughRequest) (ReadThroughResponse, error) {
 	if e := req.Validate(); e != nil {
@@ -920,7 +1026,11 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (Page[domain.Me
 		return Page[domain.Message]{}, e
 	}
 	req.PageRequest = p
-	return s.messageStore.Search(ctx, req, s.clock.Now())
+	page, err := s.messageStore.Search(ctx, req, s.clock.Now())
+	if err == nil {
+		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
+	}
+	return page, err
 }
 func (s *Service) Observe(ctx context.Context, req ObserveRequest) (Page[domain.Message], error) {
 	p, e := req.normalized()
@@ -943,7 +1053,22 @@ func (s *Service) Purge(ctx context.Context, req PurgeRequest) (PurgeRun, error)
 	}
 	return s.maintenance.Purge(ctx, req, id, s.clock.Now())
 }
-func (s *Service) Snapshot(ctx context.Context) (Snapshot, error)   { return s.maintenance.Snapshot(ctx) }
-func (s *Service) Doctor(ctx context.Context) (DoctorReport, error) { return s.maintenance.Doctor(ctx) }
+func (s *Service) Snapshot(ctx context.Context) (Snapshot, error) { return s.maintenance.Snapshot(ctx) }
+
+// Doctor composes store checks with the recorder's counters, so retrieval
+// bookkeeping that was shed under load is visible rather than silent. Shedding
+// is by design and does not make the service unhealthy.
+func (s *Service) Doctor(ctx context.Context) (DoctorReport, error) {
+	report, err := s.maintenance.Doctor(ctx)
+	if err != nil {
+		return report, err
+	}
+	if report.Checks == nil {
+		report.Checks = map[string]string{}
+	}
+	stats := s.retrievals.Stats()
+	report.Checks["retrieval_recorder"] = fmt.Sprintf("pending=%d dropped=%d overloaded=%d", stats.Pending, stats.Dropped, stats.Overloaded)
+	return report, nil
+}
 
 func requiredErr(name string) error { return fmt.Errorf("%w: %s is required", domain.ErrInvalid, name) }

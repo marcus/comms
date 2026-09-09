@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,5 +243,56 @@ func TestPurgeCascadesRetrievalRowsAfterExportHasSeenThem(t *testing.T) {
 	snapshot, e = sys.adapter.Snapshot(ctx)
 	if e != nil || len(snapshot.Retrievals) != 0 {
 		t.Fatalf("snapshot after purge=%#v %v", snapshot.Retrievals, e)
+	}
+}
+
+func TestInboxPreviewsBodiesAndDefaultsToATwentyItemPage(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	alice := join(t, sys.service, "alice", nil)
+	bob := join(t, sys.service, "bob", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, alice, topic)
+	follow(t, sys.service, bob, topic)
+	long := "Headline that fits\n\n" + strings.Repeat("detail ", 200)
+	for i := 0; i < 25; i++ {
+		if _, e := sys.service.Publish(ctx, app.PublishRequest{Author: "alice", Topic: "build", Title: "note", Body: long}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	page, e := sys.service.Inbox(ctx, app.MessageListRequest{Agent: "bob"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(page.Items) != app.InboxDefaultLimit || page.NextCursor == "" {
+		t.Fatalf("default page=%d cursor=%q", len(page.Items), page.NextCursor)
+	}
+	if page.Items[0].Body != "Headline that fits" || !page.Items[0].BodyTruncated {
+		t.Fatalf("preview item=%#v", page.Items[0])
+	}
+	full, e := sys.service.Inbox(ctx, app.MessageListRequest{Agent: "bob", Full: true, PageRequest: app.PageRequest{Limit: 1}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(full.Items) != 1 || full.Items[0].Body != long || full.Items[0].BodyTruncated {
+		t.Fatalf("full item truncated=%v length=%d", full.Items[0].BodyTruncated, len(full.Items[0].Body))
+	}
+	// Previewing is a projection: it never acknowledges anything.
+	unread, e := sys.service.Inbox(ctx, app.MessageListRequest{Agent: "bob", UnreadOnly: true, PageRequest: app.PageRequest{Limit: 25}})
+	if e != nil || len(unread.Items) != 25 {
+		t.Fatalf("unread after preview=%d %v", len(unread.Items), e)
+	}
+	// A body that already fits is returned whole and unmarked.
+	sys.clock.Advance(time.Minute)
+	short, e := sys.service.Publish(ctx, app.PublishRequest{Author: "alice", Topic: "build", Title: "short", Body: "All good."})
+	if e != nil {
+		t.Fatal(e)
+	}
+	page, e = sys.service.Inbox(ctx, app.MessageListRequest{Agent: "bob", PageRequest: app.PageRequest{Limit: 1}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if page.Items[0].ID != short.ID || page.Items[0].Body != "All good." || page.Items[0].BodyTruncated {
+		t.Fatalf("short item=%#v", page.Items[0])
 	}
 }

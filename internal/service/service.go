@@ -71,6 +71,9 @@ func Run(ctx context.Context, cfg Config) error {
 	defer func() { _ = adapter.Close() }()
 
 	application := app.NewService(adapter, domain.UTCClock{})
+	// The recorder must drain before the store closes, so every return path
+	// closes the application first.
+	defer func() { _ = application.Close() }()
 	var handler http.Handler
 	if cfg.Listen != "" {
 		handler = httpapi.NewTCPHandler(application, life)
@@ -93,6 +96,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer func() {
+		_ = application.Close()
 		_ = adapter.Close()
 		cleanup()
 	}()

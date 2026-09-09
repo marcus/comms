@@ -725,6 +725,7 @@ func (r *runner) inbox(args []string) error {
 	unread := fs.Bool("unread", false, "")
 	threads := fs.Bool("threads", false, "")
 	includeSelf := fs.Bool("include-self", false, "")
+	full := fs.Bool("full", false, "")
 	limit := fs.Int("limit", 0, "")
 	cursor := fs.String("cursor", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -739,6 +740,7 @@ func (r *runner) inbox(args []string) error {
 	setBool(q, "unread", *unread)
 	setBool(q, "threads", *threads)
 	setBool(q, "include_self", *includeSelf)
+	setBool(q, "full", *full)
 	return r.get("/v1/inbox", q, true)
 }
 
@@ -1113,7 +1115,11 @@ func renderMessage(w io.Writer, v map[string]any, compact bool) error {
 	}
 
 	renderedBody := body
-	if compact {
+	// A body the service already cut carries its own marker; --compact only
+	// trims what arrived whole.
+	if truncated, _ := v["body_truncated"].(bool); truncated {
+		renderedBody = fmt.Sprintf("%s ... [truncated; use 'comms peek %s' for full body]", strings.TrimRight(body, "\n"), id)
+	} else if compact {
 		lines := strings.Split(body, "\n")
 		firstLine := strings.TrimRight(lines[0], "\r")
 		if len(lines) > 1 || len(firstLine) > 80 {

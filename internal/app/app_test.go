@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcus/comms/internal/domain"
 )
@@ -129,5 +131,36 @@ func TestNotifierWakesEveryCurrentSubscriberAndReleasesSlots(t *testing.T) {
 	releaseSecond()
 	if notifier.Subscribers() != 0 {
 		t.Fatalf("subscribers after all releases=%d", notifier.Subscribers())
+	}
+}
+
+func TestPreviewBodyCutsAtTheParagraphAndTheRuneBoundary(t *testing.T) {
+	long := strings.Repeat("é", InboxPreviewLimit+40)
+	tests := []struct {
+		name      string
+		body      string
+		want      string
+		truncated bool
+	}{
+		{name: "short body is returned whole", body: "Build succeeded.", want: "Build succeeded."},
+		{name: "single trailing newline is not a cut", body: "Build succeeded.\n", want: "Build succeeded.\n"},
+		{name: "blank line ends the preview", body: "Headline\n\nDetail paragraph.", want: "Headline", truncated: true},
+		{name: "wrapped lines stay in the lead paragraph", body: "First line\nsecond line", want: "First line\nsecond line"},
+		{name: "carriage returns still mark a blank line", body: "Headline\r\n\r\nDetail.", want: "Headline", truncated: true},
+		{name: "long body is capped", body: long, want: strings.Repeat("é", InboxPreviewLimit), truncated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := PreviewBody(tt.body)
+			if got != tt.want || truncated != tt.truncated {
+				t.Fatalf("preview=%q truncated=%v want %q %v", got, truncated, tt.want, tt.truncated)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("preview split a UTF-8 sequence: %q", got)
+			}
+			if truncated && utf8.RuneCountInString(got) > InboxPreviewLimit {
+				t.Fatalf("preview kept %d runes", utf8.RuneCountInString(got))
+			}
+		})
 	}
 }

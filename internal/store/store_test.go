@@ -97,7 +97,7 @@ func TestConversationReceiptsAndIdempotency(t *testing.T) {
 	if len(box.Items) != 1 || box.Items[0].ID != root.ID {
 		t.Fatalf("inbox=%#v", box)
 	}
-	if _, e = sys.service.Peek(ctx, string(root.ID)); e != nil {
+	if _, e = sys.service.Peek(ctx, app.PeekRequest{Message: string(root.ID)}); e != nil {
 		t.Fatal(e)
 	}
 	box, e = sys.service.Inbox(ctx, app.MessageListRequest{Agent: "bob", UnreadOnly: true})
@@ -211,7 +211,7 @@ func TestIdentityTopicsAndDirectRouting(t *testing.T) {
 	if len(found.Items) != 1 || found.Items[0].ID != direct.ID {
 		t.Fatalf("search=%#v", found)
 	}
-	if _, e = sys.service.Peek(ctx, string(direct.ID)); e != nil {
+	if _, e = sys.service.Peek(ctx, app.PeekRequest{Message: string(direct.ID)}); e != nil {
 		t.Fatal(e)
 	}
 }
@@ -313,7 +313,7 @@ func TestRetentionPreservesLiveThreadContext(t *testing.T) {
 	if e != nil || run.RemovedMessages != 2 {
 		t.Fatalf("final purge=%#v %v", run, e)
 	}
-	if _, e = sys.service.Peek(ctx, string(root.ID)); !errors.Is(e, app.ErrNotFound) {
+	if _, e = sys.service.Peek(ctx, app.PeekRequest{Message: string(root.ID)}); !errors.Is(e, app.ErrNotFound) {
 		t.Fatalf("purged root error=%v", e)
 	}
 }
@@ -736,7 +736,7 @@ func TestInboxExcludesSelfAuthoredMessagesByDefault(t *testing.T) {
 			t.Fatalf("%s dropped alice's own messages: %#v", name, page.Items)
 		}
 	}
-	if _, e := sys.service.Peek(ctx, string(mine.ID)); e != nil {
+	if _, e := sys.service.Peek(ctx, app.PeekRequest{Message: string(mine.ID)}); e != nil {
 		t.Fatalf("peek on own message: %v", e)
 	}
 }
