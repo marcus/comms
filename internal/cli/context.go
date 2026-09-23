@@ -2,7 +2,9 @@ package cli
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -34,16 +36,18 @@ func resolveIdentity(explicit string, getenv func(string) string) (selectedIdent
 	path := getenv("COMMS_CONTEXT")
 	source := "COMMS_CONTEXT"
 	if path == "" {
-		var err error
-		path, err = defaultContextPath(false, getenv)
+		selected, err := defaultContext(false, getenv)
 		if err != nil {
 			return selectedIdentity{}, err
 		}
-		source = "default_context"
+		path, source = selected.Path, selected.Source
 	}
 	record, err := readContext(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if source == "session_context" {
+				return selectedIdentity{}, fmt.Errorf("no Comms identity selected for this session; run 'comms join HANDLE' here for a new identity, or use --as HANDLE for an existing one")
+			}
 			return selectedIdentity{}, fmt.Errorf("no Comms identity selected; run 'comms join HANDLE' or use --as")
 		}
 		return selectedIdentity{}, err
@@ -51,25 +55,56 @@ func resolveIdentity(explicit string, getenv func(string) string) (selectedIdent
 	return selectedIdentity{Agent: record.AgentID, Source: source, Record: record}, nil
 }
 
-func defaultContextPath(create bool, getenv func(string) string) (string, error) {
+// implicitContext is the context file used when neither --context nor
+// COMMS_CONTEXT names one. Source is "session_context" when the file belongs
+// to one terminal session and "default_context" for the machine-wide file.
+type implicitContext struct {
+	Path    string
+	Source  string
+	Session string
+}
+
+// sessionKey names the terminal session this process runs in, so concurrent
+// agents on one machine each get their own implicit identity. COMMS_SESSION
+// lets any harness choose the scope; a tmux pane is the fallback because
+// multi-agent setups run one agent per pane. The socket path is part of the
+// key because pane IDs repeat across tmux servers.
+func sessionKey(getenv func(string) string) (key, kind string) {
+	if value := getenv("COMMS_SESSION"); value != "" {
+		return "comms:" + value, "COMMS_SESSION"
+	}
+	if pane := getenv("TMUX_PANE"); pane != "" {
+		socket, _, _ := strings.Cut(getenv("TMUX"), ",")
+		return "tmux:" + socket + ":" + pane, "tmux"
+	}
+	return "", ""
+}
+
+func defaultContext(create bool, getenv func(string) string) (implicitContext, error) {
 	dir := getenv("COMMS_STATE_DIR")
 	if dir == "" {
 		dir = getenv("XDG_STATE_HOME")
 		if dir == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
-				return "", err
+				return implicitContext{}, err
 			}
 			dir = filepath.Join(home, ".local", "state")
 		}
 		dir = filepath.Join(dir, "comms")
 	}
+	selected := implicitContext{Path: filepath.Join(dir, "context.json"), Source: "default_context"}
+	if key, kind := sessionKey(getenv); key != "" {
+		sum := sha256.Sum256([]byte(key))
+		dir = filepath.Join(dir, "sessions")
+		selected = implicitContext{Path: filepath.Join(dir, hex.EncodeToString(sum[:12])+".json"), Source: "session_context", Session: kind}
+	}
 	if create {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return "", err
+			return implicitContext{}, err
 		}
 	}
-	return filepath.Join(dir, "context.json"), nil
+	return selected, nil
 }
 
 func readContext(path string) (SessionContext, error) {

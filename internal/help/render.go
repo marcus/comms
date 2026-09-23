@@ -127,6 +127,7 @@ func AgentInstructions() Instructions {
 			"A resolved agent wait proves only that a handle is registered and addressable, not that its process is running, idle, or willing to answer.",
 			"Direct topics control routing and ordinary discovery, not trusted-local read access.",
 			"Comms does not spawn agents, assign work, execute messages, or replace project documentation and task trackers.",
+			"An implicit identity is per tmux pane, or per COMMS_SESSION value; concurrent agents that share neither must each set COMMS_SESSION or COMMS_CONTEXT, or pass --as.",
 		},
 		Examples: []string{
 			"comms join build-agent --harness codex --context ./comms-context.json",
@@ -342,7 +343,7 @@ func renderOperationHelp(program string, op Operation) string {
 	}
 
 	if op.RequiresIdentity {
-		fmt.Fprintf(&b, "\nIdentity:\n  Requires an active agent session (pass --as AGENT or set COMMS_CONTEXT).\n")
+		fmt.Fprintf(&b, "\nIdentity:\n  Requires an active agent session (pass --as AGENT, set COMMS_CONTEXT, or join from this session).\n")
 	} else {
 		fmt.Fprintf(&b, "\nIdentity:\n  CLI-only; does not require an agent identity.\n")
 	}

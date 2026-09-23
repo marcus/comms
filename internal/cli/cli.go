@@ -349,6 +349,7 @@ func (r *runner) join(args []string) error {
 	extNS := fs.String("external-namespace", "", "")
 	extKey := fs.String("external-key", "", "")
 	contextPath := fs.String("context", r.env.Getenv("COMMS_CONTEXT"), "")
+	replace := fs.Bool("replace", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usage(err.Error())
 	}
@@ -358,12 +359,15 @@ func (r *runner) join(args []string) error {
 	if (*extNS == "") != (*extKey == "") {
 		return usage("--external-namespace and --external-key must be provided together")
 	}
-	if *contextPath == "" {
-		var err error
-		*contextPath, err = defaultContextPath(true, r.env.Getenv)
+	source := "context"
+	implicit := *contextPath == ""
+	session := ""
+	if implicit {
+		selected, err := defaultContext(true, r.env.Getenv)
 		if err != nil {
 			return err
 		}
+		*contextPath, source, session = selected.Path, selected.Source, selected.Session
 	}
 	record, err := readContext(*contextPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -389,8 +393,28 @@ func (r *runner) join(args []string) error {
 	if err != nil {
 		return err
 	}
+	// An implicit context may be shared with other agents (the machine-wide
+	// file, or one tmux pane running several). Switching it to a different
+	// agent would silently change who every one of them is, so that needs
+	// --replace. Only a join by external reference can land on the agent the
+	// context already holds; any other join registers a new agent, so it is
+	// refused before it creates one.
+	var current domain.Agent
+	takeover := false
+	if implicit && !*replace && record.AgentID != "" {
+		current, takeover, err = r.activeContextAgent(client, record.AgentID)
+		if err != nil {
+			return err
+		}
+		if takeover && *extNS == "" {
+			return r.contextTakeoverError(current, handle, source)
+		}
+	}
 	if err = r.do(client, http.MethodPost, "/v1/agents/join", nil, req, &response); err != nil {
 		return err
+	}
+	if takeover && record.AgentID != string(response.Agent.ID) {
+		return r.contextTakeoverError(current, response.Agent.Handle, source)
 	}
 	record.AgentID = string(response.Agent.ID)
 	record.Harness = *harness
@@ -399,7 +423,39 @@ func (r *runner) join(args []string) error {
 	if err = writeContext(*contextPath, record); err != nil {
 		return fmt.Errorf("write context: %w", err)
 	}
-	return r.output(map[string]any{"agent": response.Agent, "rejoined": response.Rejoined, "context": *contextPath, "identity_source": "context"})
+	out := map[string]any{"agent": response.Agent, "rejoined": response.Rejoined, "context": *contextPath, "identity_source": source}
+	if session != "" {
+		out["session"] = session
+	}
+	return r.output(out)
+}
+
+// activeContextAgent reports the agent a context file holds while it is still
+// active. A retired or forgotten agent leaves nothing to take over.
+func (r *runner) activeContextAgent(client *httpapi.Client, id string) (domain.Agent, bool, error) {
+	var agent domain.Agent
+	err := r.do(client, http.MethodGet, "/v1/agents/"+url.PathEscape(id), nil, nil, &agent)
+	if errors.Is(err, app.ErrNotFound) {
+		return agent, false, nil
+	}
+	if err != nil {
+		return agent, false, err
+	}
+	return agent, agent.RetiredAt == nil, nil
+}
+
+func (r *runner) contextTakeoverError(current domain.Agent, joining, source string) error {
+	scope := "this session"
+	hint := "Run each concurrent agent in its own tmux pane or with its own COMMS_SESSION"
+	if source == "default_context" {
+		scope = "every session on this machine without its own context"
+		hint = "Give each concurrent agent its own COMMS_SESSION or COMMS_CONTEXT"
+	}
+	target := "a new agent"
+	if joining != "" {
+		target = "@" + joining
+	}
+	return fmt.Errorf("%w: the identity for %s is already @%s, so joining as %s would switch it for every agent that shares it. %s, use --as, or rerun join with --replace to switch", app.ErrConflict, scope, current.Handle, target, hint)
 }
 
 func (r *runner) whoami(args []string) error {

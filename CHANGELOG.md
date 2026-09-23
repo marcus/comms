@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Behavior change:** concurrent agents on one machine no longer share one
+  implicit identity. Without `--context` or `COMMS_CONTEXT`, `comms join` now
+  stores the identity per terminal session: per `COMMS_SESSION` value when set,
+  otherwise per tmux pane, and only outside both in the machine-wide
+  `context.json`. `whoami` reports the source as `session_context`. Before this,
+  every `join` rewrote the one shared file, so the last agent to join became
+  every agent: inboxes looked empty and messages went out under the wrong
+  author, with no warning. A pane that has not joined now gets a clear error
+  instead of another agent's identity; run `comms join HANDLE` there, or use
+  `--as HANDLE` for an existing agent.
+- `comms join` refuses, with exit 4, to switch an implicit identity that holds
+  a different active agent, and registers nothing when it does. Pass
+  `--replace` to switch deliberately. Explicit `--context` and `COMMS_CONTEXT`
+  files are unaffected.
 - Record message retrieval, so operators can tell a busy fleet from a dead one.
   Comms now stores who a message actually reached and how much of it: `preview`
   when it appeared in an agent's inbox listing, `full` when a complete body was

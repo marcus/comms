@@ -686,3 +686,72 @@ func TestRetrievalTrackingSurvivesTheWholeStack(t *testing.T) {
 		t.Fatalf("doctor recorder check=%q", recorder)
 	}
 }
+
+// Two agents joining from separate tmux panes each keep their own identity,
+// and a join that would switch a shared implicit context to another agent is
+// refused until --replace (td-1c02ac).
+func TestBlackBoxConcurrentSessionsKeepTheirIdentity(t *testing.T) {
+	_, socket := startDaemon(t)
+	state := t.TempDir()
+	pane := func(id string) map[string]string {
+		return map[string]string{"COMMS_STATE_DIR": state, "TMUX": "/tmp/tmux-test/default,1,0", "TMUX_PANE": id}
+	}
+	alice, bob := pane("%1"), pane("%2")
+	joinedAlice := runJSON(t, socket, alice, "join", "alice")
+	if joinedAlice["identity_source"] != "session_context" || joinedAlice["session"] != "tmux" {
+		t.Fatalf("alice join = %#v, want a tmux session context", joinedAlice)
+	}
+	runJSON(t, socket, bob, "join", "bob")
+	if got := stringValue(t, mapValue(t, runJSON(t, socket, alice, "whoami"), "agent"), "handle"); got != "alice" {
+		t.Fatalf("alice's pane is %q after bob joined", got)
+	}
+	runJSON(t, socket, bob, "send", "@alice", "--title", "hi", "--body", "for alice")
+	if items := arrayValue(t, runJSON(t, socket, alice, "inbox"), "items"); len(items) != 1 {
+		t.Fatalf("alice inbox = %#v, want bob's message", items)
+	}
+
+	// A pane with no join of its own does not inherit anyone's identity.
+	code, stderr := runCode(t, socket, pane("%3"), "whoami")
+	if code != 2 || !strings.Contains(stderr, "this session") {
+		t.Fatalf("unjoined pane whoami: code=%d stderr=%s", code, stderr)
+	}
+
+	// Outside tmux the machine-wide context is shared, so a second agent's
+	// join must not silently take it over.
+	shared := map[string]string{"COMMS_STATE_DIR": state}
+	runJSON(t, socket, shared, "join", "carol")
+	code, stderr = runCode(t, socket, shared, "join", "dave")
+	if code != 4 || !strings.Contains(stderr, "@carol") || !strings.Contains(stderr, "--replace") {
+		t.Fatalf("takeover join: code=%d stderr=%s", code, stderr)
+	}
+	if got := stringValue(t, mapValue(t, runJSON(t, socket, shared, "whoami"), "agent"), "handle"); got != "carol" {
+		t.Fatalf("shared identity is %q after a refused takeover", got)
+	}
+	if code, _ := runCode(t, socket, shared, "agent", "wait", "@dave", "--timeout", "10ms"); code != 5 {
+		t.Fatalf("a refused takeover registered @dave (agent wait code=%d)", code)
+	}
+	runJSON(t, socket, shared, "join", "dave", "--replace")
+	if got := stringValue(t, mapValue(t, runJSON(t, socket, shared, "whoami"), "agent"), "handle"); got != "dave" {
+		t.Fatalf("shared identity is %q after --replace", got)
+	}
+	// A retired agent leaves nothing to take over.
+	runJSON(t, socket, shared, "agent", "retire", "dave")
+	runJSON(t, socket, shared, "join", "frank")
+
+	// COMMS_SESSION scopes identity without tmux.
+	scoped := map[string]string{"COMMS_STATE_DIR": state, "COMMS_SESSION": "worker-1"}
+	if out := runJSON(t, socket, scoped, "join", "erin"); out["session"] != "COMMS_SESSION" {
+		t.Fatalf("COMMS_SESSION join = %#v", out)
+	}
+	if got := stringValue(t, mapValue(t, runJSON(t, socket, shared, "whoami"), "agent"), "handle"); got != "frank" {
+		t.Fatalf("COMMS_SESSION join changed the shared identity to %q", got)
+	}
+}
+
+func runCode(t *testing.T, socket string, environment map[string]string, args ...string) (int, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	full := append([]string{"--socket", socket}, args...)
+	code := Run(Env{Args: full, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Getenv: func(key string) string { return environment[key] }})
+	return code, stderr.String()
+}

@@ -110,7 +110,7 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 All commands return human-readable text by default, or structured JSON with `--json`.
 
 ### Identity & Sessions
-- `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH]`: Register or reconnect a session context.
+- `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH] [--replace]`: Register or reconnect a session context. Without `--context` or `COMMS_CONTEXT`, the identity is stored per terminal session: per `COMMS_SESSION` value when set, else per tmux pane, else in one machine-wide file. Join refuses to switch that implicit identity to a different active agent unless you pass `--replace`, so concurrent agents cannot silently take over each other's identity.
 - `comms whoami`: Print the resolved active session and context source.
 - `comms agents`: List known agent sessions.
 - `comms agent get AGENT`: Inspect details of a specific agent.
