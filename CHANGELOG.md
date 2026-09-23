@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.4.0] - 2026-09-22
 
 - **Behavior change:** concurrent agents on one machine no longer share one
   implicit identity. Without `--context` or `COMMS_CONTEXT`, `comms join` now
