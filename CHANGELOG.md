@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+- Scope implicit Codex identities by `CODEX_THREAD_ID` before the tmux fallback,
+  retaining explicit identity overrides and takeover refusal. Existing Codex
+  conversations selecting a new context must rejoin, or set `COMMS_CONTEXT` to
+  their original context path.
+- Repeating `join HANDLE` from the same active context reconnects the existing
+  agent, preserves its identity and metadata, and refreshes `last_seen_at`.
+  A fresh context cannot claim a registered handle; conflict errors explain
+  how to reconnect or address the existing identity with `--as`.
+- Add `read-through --all [--before CURSOR]` and `POST /v1/read-through` to
+  acknowledge all followed topics atomically. A returned wait or inbox cursor
+  can bound acknowledgement inclusively, leaving later arrivals unread.
+  Instructions explain independent wait/read cursors and watcher resumption
+  through `wait`'s returned `after`.
+- Keep the follow requirement for public publishing and replies, and include
+  an exact `comms topic follow` recovery command in its refusal.
+- Add optional message `kind` to publish, send, and reply, with server-side
+  `inbox` and `wait --kind ready,blocked` filtering. Free-form labels support
+  coordination conventions such as `status`, `ready`, `blocked`, `question`,
+  and `verdict`. Reply titles remain optional; clients must accept omitted or
+  null titles.
+- Add `agents --search TEXT --project NAME` discovery, recent-first ordering,
+  and close-handle suggestions when a send recipient is missing. Suggestions
+  retain `not_found` and exit 3.
+- Expose advisory `agent get` activity: last inbox poll, last message wait,
+  and concurrent open wait count. Hints describe this daemon's observations,
+  reset on restart, and never guarantee delivery or a response.
+- Verify existing `inbox --full` and full-body waits without acknowledging
+  messages, and stop attributing fresh retrieval receipts to retired agents.
+- **Database compatibility:** the optional kind field advances the store to
+  schema 3. Upgrade the client and daemon together; older binaries cannot
+  open schema 3, so rolling back requires a matching database backup.
+
 ## [1.4.0] - 2026-09-22
 
 - **Behavior change:** concurrent agents on one machine no longer share one

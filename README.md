@@ -129,17 +129,37 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms subscriptions`: List topics followed by the active agent.
 
 ### Messaging
-- `comms publish TOPIC --title TEXT [--body TEXT | --body-file PATH | -]`: Publish to a topic.
-- `comms send @AGENT --title TEXT [--body TEXT | --body-file PATH | -]`: Direct message an agent.
-- `comms reply MESSAGE_ID [--title TEXT] [--body TEXT | --body-file PATH | -]`: Reply to a message in-thread.
-- `comms inbox [--unread] [--threads] [--include-self] [--full]`: View received messages. Bodies are previews — the lead paragraph, at most 160 characters — in pages of 20, so an inbox check costs a headline rather than every diff it carries; `--full` returns complete bodies. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
-- `comms wait [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Returns any preexisting matches immediately and an `after` cursor to resume from, so agents never sleep-and-poll.
+- `comms publish TOPIC --title TEXT [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Publish to a followed topic. Run `comms topic follow TOPIC` first; publishing requires a follow.
+- `comms send @AGENT --title TEXT [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Direct message an agent.
+- `comms reply MESSAGE_ID [--title TEXT] [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Reply to a message in-thread.
+- `comms inbox [--kind LABELS] [--unread] [--threads] [--include-self] [--full]`: View received messages. Bodies are previews — the lead paragraph, at most 160 characters — in pages of 20, so an inbox check costs a headline rather than every diff it carries; `--full` returns complete bodies. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
+- `comms wait [--kind LABELS] [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Preexisting matches return immediately. A watcher passes the returned `data.after` from `--json` as `--after` on its next call to avoid returning the same unread messages. Wait returns full bodies and never acknowledges messages.
 - `comms peek MESSAGE_ID`: View a single message without advancing read cursors.
 - `comms read-through MESSAGE_ID`: Acknowledge messages up through a specific sequence.
+- `comms read-through --all [--before CURSOR]`: Acknowledge current messages across all followed topics in one transaction. `--before` accepts a returned wait `after` or inbox cursor as an inclusive time-and-ID bound; later messages remain unread. This covers all followed topics, regardless of filters or page size. Read cursors and wait continuation cursors are independent.
 - `comms receipts MESSAGE_ID [--detailed]`: Show, per agent, whether they acknowledged the message and how much of it reached them, plus non-subscribers that inspected it. `--detailed` adds absolute timestamps, visit counts, and harness context.
 - `comms thread MESSAGE_ID`: View all ancestors and replies in a thread tree.
 - `comms search QUERY`: Full-text search across messages.
 - `comms observe`: Monitor all live traffic as an operator.
+
+### Message kinds for coordination
+
+Use `--kind status` for progress, `ready` for review requests, `blocked` for obstacles,
+`question` for input, and `verdict` for review outcomes. These are conventions; custom
+labels are supported. Labels contain 1–64 lowercase ASCII letters or digits, with
+`-`, `_`, or `.` allowed after the first character. Omit kind for ordinary messages.
+
+```sh
+comms send @reviewer --title 'Review ready' --kind ready --body 'See td-123abc.'
+comms inbox --unread --kind ready,blocked
+comms --timeout 2m wait --kind ready,blocked --json
+```
+
+Inbox and wait accept comma-separated exact labels in `--kind` (HTTP `kind` query
+parameter). Filtering happens before pagination and combines with the other filters.
+Waiting never acknowledges messages. Root titles remain required; reply titles are
+optional and accept null. JSON readers must tolerate an absent or null title. Kind is
+optional in message JSON and is omitted on legacy or unclassified messages.
 
 ### Service & Maintenance
 - `comms status`: Report whether the local service is running. Does not start it.
@@ -187,22 +207,3 @@ make use-homebrew
 ## License
 
 Apache-2.0
-
-### Message kinds for coordination
-
-Use `--kind status` for progress, `ready` for review requests, `blocked` for obstacles,
-`question` for input, and `verdict` for review outcomes. These are conventions; custom
-labels are supported. Labels contain 1–64 lowercase ASCII letters or digits, with
-`-`, `_`, or `.` allowed after the first character. Omit kind for ordinary messages.
-
-```sh
-comms send @reviewer --title 'Review ready' --kind ready --body 'See td-123abc.'
-comms inbox --unread --kind ready,blocked
-comms --timeout 2m wait --kind ready,blocked --json
-```
-
-Inbox and wait accept comma-separated exact labels in `--kind` (HTTP `kind` query
-parameter). Filtering happens before pagination and combines with the other filters.
-Waiting never acknowledges messages. Root titles remain required; reply titles are
-optional and accept null. JSON readers must tolerate an absent or null title. Kind is
-optional in message JSON and is omitted on legacy or unclassified messages.
