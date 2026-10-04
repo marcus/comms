@@ -416,6 +416,17 @@ func (r *runner) join(args []string) error {
 			}
 		}
 		err = r.do(client, http.MethodPatch, "/v1/agents/"+url.PathEscape(record.AgentID), nil, body, &response.Agent)
+		if err == nil {
+			// Reconnecting is activity by the context's agent, even when an
+			// ambient --as or COMMS_AGENT_ID selects another identity.
+			var touched struct {
+				Agent domain.Agent `json:"agent"`
+			}
+			err = r.do(client.WithAgent(record.AgentID), http.MethodGet, "/v1/whoami", nil, nil, &touched)
+			if err == nil {
+				response.Agent = touched.Agent
+			}
+		}
 		response.Rejoined = true
 	} else {
 		err = r.do(client, http.MethodPost, "/v1/agents/join", nil, req, &response)

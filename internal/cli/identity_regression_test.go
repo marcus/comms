@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCodexThreadsSharingInheritedPaneJoinIndependently(t *testing.T) {
@@ -89,5 +90,37 @@ func TestJoinSameContextReconnectsWithoutClaimingOtherIdentity(t *testing.T) {
 	}
 	if got := runJSON(t, socket, env, "whoami"); mapValue(t, got, "agent")["id"] != a["id"] {
 		t.Fatalf("refused takeover changed identity: %#v", got)
+	}
+}
+
+func TestJoinReconnectRefreshesContextAgentLastSeen(t *testing.T) {
+	_, socket := startDaemon(t)
+	state := t.TempDir()
+	env := map[string]string{"COMMS_STATE_DIR": state, "COMMS_SESSION": "resuming"}
+	first := runJSON(t, socket, env, "join", "resuming")
+	before := mapValue(t, first, "agent")
+	other := runJSON(t, socket, nil, "join", "other", "--context", filepath.Join(state, "other.json"))
+	// Model a resumed context while ambient identity overrides point elsewhere.
+	env["COMMS_AGENT_ID"] = "other"
+	resumedAt := time.Now().UTC()
+	rejoined := runJSON(t, socket, env, "--as", "other", "join", "resuming")
+	after := mapValue(t, rejoined, "agent")
+	seen, err := time.Parse(time.RFC3339Nano, stringValue(t, after, "last_seen_at"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSeen, err := time.Parse(time.RFC3339Nano, stringValue(t, before, "last_seen_at"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SQLite stores microseconds, so account for timestamp truncation.
+	if rejoined["rejoined"] != true || after["id"] != before["id"] || !seen.After(oldSeen) || seen.Before(resumedAt.Truncate(time.Microsecond)) {
+		t.Fatalf("reconnect did not refresh activity: before=%#v after=%#v resumedAt=%s", before, after, resumedAt)
+	}
+	// Operator retrieval does not touch activity; the ambient agent must retain
+	// its prior timestamp while the context-selected agent was refreshed.
+	listed := runJSON(t, socket, nil, "agent", "get", "other")
+	if listed["last_seen_at"] != mapValue(t, other, "agent")["last_seen_at"] {
+		t.Fatalf("reconnect touched ambient agent: %#v", listed)
 	}
 }
