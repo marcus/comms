@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.5.0] - 2026-10-04
 
 - Scope implicit Codex identities by `CODEX_THREAD_ID` before the tmux fallback,
   retaining explicit identity overrides and takeover refusal. Existing Codex
