@@ -116,17 +116,25 @@ func (k TopicKind) Validate() error {
 }
 
 type Agent struct {
-	ID          AgentID    `json:"id"`
-	Handle      string     `json:"handle"`
-	DisplayName string     `json:"display_name,omitempty"`
-	Purpose     string     `json:"purpose,omitempty"`
-	Harness     string     `json:"harness,omitempty"`
-	Project     string     `json:"project,omitempty"`
-	SessionRef  string     `json:"session_ref,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	LastSeenAt  time.Time  `json:"last_seen_at"`
-	RetiredAt   *time.Time `json:"retired_at,omitempty"`
+	ID          AgentID        `json:"id"`
+	Handle      string         `json:"handle"`
+	DisplayName string         `json:"display_name,omitempty"`
+	Purpose     string         `json:"purpose,omitempty"`
+	Harness     string         `json:"harness,omitempty"`
+	Project     string         `json:"project,omitempty"`
+	SessionRef  string         `json:"session_ref,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	LastSeenAt  time.Time      `json:"last_seen_at"`
+	RetiredAt   *time.Time     `json:"retired_at,omitempty"`
+	Activity    *AgentActivity `json:"activity,omitempty"`
+}
+
+// AgentActivity is an advisory daemon-lifetime observation, never a delivery guarantee.
+type AgentActivity struct {
+	LastWaitAt  *time.Time `json:"last_wait_at,omitempty"`
+	LastInboxAt *time.Time `json:"last_inbox_at,omitempty"`
+	OpenWaits   int        `json:"open_waits"`
 }
 
 func (a Agent) Validate() error {

@@ -109,7 +109,9 @@ type RetireAgentRequest struct {
 
 type AgentListRequest struct {
 	PageRequest
-	IncludeRetired bool `json:"include_retired,omitempty"`
+	IncludeRetired bool   `json:"include_retired,omitempty"`
+	Search         string `json:"search,omitempty"`
+	Project        string `json:"project,omitempty"`
 }
 
 type CreateTopicRequest struct {
@@ -534,6 +536,7 @@ type Service struct {
 	agentEvents   Notifier
 	messageEvents Notifier
 	retrievals    *RetrievalRecorder
+	activity      activityRegistry
 }
 
 // AgentEvents and MessageEvents expose the service's own change signals. Every
@@ -602,7 +605,11 @@ func (s *Service) GetAgent(ctx context.Context, ref string, touch bool) (domain.
 	if strings.TrimSpace(ref) == "" {
 		return domain.Agent{}, requiredErr("agent")
 	}
-	return s.agents.GetAgent(ctx, ref, touch, s.clock.Now())
+	agent, err := s.agents.GetAgent(ctx, ref, touch, s.clock.Now())
+	if err == nil {
+		agent.Activity = s.activity.get(agent.ID)
+	}
+	return agent, err
 }
 func (s *Service) UpdateAgent(ctx context.Context, req UpdateAgentRequest) (domain.Agent, error) {
 	if err := req.Validate(); err != nil {
@@ -637,6 +644,8 @@ func (s *Service) Agents(ctx context.Context, req AgentListRequest) (Page[domain
 		return Page[domain.Agent]{}, e
 	}
 	req.PageRequest = p
+	req.Search = strings.TrimPrefix(strings.TrimSpace(req.Search), "@")
+	req.Project = strings.TrimSpace(req.Project)
 	return s.agents.ListAgents(ctx, req, s.clock.Now())
 }
 
@@ -751,7 +760,11 @@ func (s *Service) DirectSend(ctx context.Context, req DirectSendRequest) (domain
 	if e := req.Validate(); e != nil {
 		return domain.Message{}, e
 	}
-	return s.prepareAnd(ctx, req.Mutation, req.Author, "", "", req.Recipient, req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.DirectSend)
+	message, err := s.prepareAnd(ctx, req.Mutation, req.Author, "", "", req.Recipient, req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.DirectSend)
+	if errors.Is(err, ErrNotFound) {
+		err = s.suggestRecipient(ctx, req.Recipient, err)
+	}
+	return message, err
 }
 func (s *Service) Reply(ctx context.Context, req ReplyRequest) (domain.Message, error) {
 	if e := req.Validate(); e != nil {
@@ -795,6 +808,10 @@ func (s *Service) Inbox(ctx context.Context, req MessageListRequest) (Page[domai
 	page, err := s.listMessages(ctx, req, s.messageStore.Inbox)
 	if err != nil {
 		return page, err
+	}
+	agent, activityErr := s.agents.GetAgent(ctx, req.Agent, false, s.clock.Now())
+	if activityErr == nil {
+		s.activity.poll(agent.ID, s.clock.Now())
 	}
 	if req.Full {
 		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
@@ -967,6 +984,8 @@ func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (
 	if err != nil {
 		return MessageWaitResponse{}, err
 	}
+	finishActivity := s.activity.wait(resolved.AgentID, s.clock.Now())
+	defer finishActivity()
 	for {
 		result, err := s.messageStore.MatchingMessages(ctx, req, resolved, s.clock.Now())
 		if err != nil {

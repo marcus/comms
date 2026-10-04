@@ -501,9 +501,25 @@ func (r *runner) whoami(args []string) error {
 	return r.output(response)
 }
 func (r *runner) listAgents(args []string) error {
-	q, e := listQuery("agents", args, false)
+	fs := newFlagSet("agents")
+	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
+	search := fs.String("search", "", "")
+	project := fs.String("project", "", "")
+	all := fs.Bool("all", false, "")
+	fs.Bool("latest", false, "") // Retain the previously accepted flag.
+	e := fs.Parse(args)
+	q := url.Values{}
+	setInt(q, "limit", *limit)
+	set(q, "cursor", *cursor)
+	set(q, "search", *search)
+	set(q, "project", *project)
+	setBool(q, "include_retired", *all)
+	if e == nil && fs.NArg() != 0 {
+		e = usage("unexpected agents arguments")
+	}
 	if e != nil {
-		return e
+		return usage(e.Error())
 	}
 	return r.get("/v1/agents", q, false)
 }
@@ -1111,6 +1127,19 @@ func renderHuman(w io.Writer, value any, compact bool) error {
 		if id, _ := v["id"].(string); id != "" {
 			if handle, _ := v["handle"].(string); handle != "" {
 				_, err := fmt.Fprintf(w, "@%s\t%s\n", handle, id)
+				if err != nil {
+					return err
+				}
+				if activity, ok := v["activity"].(map[string]any); ok {
+					inbox, wait := "unobserved", "unobserved"
+					if value, ok := activity["last_inbox_at"].(string); ok {
+						inbox = value
+					}
+					if value, ok := activity["last_wait_at"].(string); ok {
+						wait = value
+					}
+					_, err = fmt.Fprintf(w, "activity (advisory, since daemon startup): last inbox=%s; last wait=%s; open waits=%v\n", inbox, wait, activity["open_waits"])
+				}
 				return err
 			}
 			if _, ok := v["body"].(string); ok {

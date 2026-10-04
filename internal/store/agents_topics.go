@@ -157,12 +157,19 @@ func (a *Adapter) RetireAgent(ctx context.Context, req app.RetireAgentRequest, n
 }
 
 func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now time.Time) (app.Page[domain.Agent], error) {
-	p, e := decodeCursor(req.Cursor, 2)
+	p, e := decodeCursor(req.Cursor, 3)
 	if e != nil {
 		return app.Page[domain.Agent]{}, e
 	}
-	query := "SELECT " + agentCols + " FROM agents WHERE (? OR retired_at IS NULL) AND (?='' OR lower(handle)>lower(?) OR (lower(handle)=lower(?) AND id>?)) ORDER BY lower(handle),id LIMIT ?"
-	rows, e := a.read.QueryContext(ctx, query, req.IncludeRetired, p[0], p[0], p[0], p[1], req.Limit+1)
+	var seen int64
+	if p[0] != "" {
+		seen, e = strconv.ParseInt(p[0], 10, 64)
+		if e != nil {
+			return app.Page[domain.Agent]{}, fmt.Errorf("%w: invalid agent cursor", domain.ErrInvalid)
+		}
+	}
+	query := "SELECT " + agentCols + " FROM agents WHERE (? OR retired_at IS NULL) AND (?='' OR instr(lower(handle),lower(?))>0 OR instr(lower(display_name),lower(?))>0 OR instr(lower(purpose),lower(?))>0 OR instr(lower(project),lower(?))>0) AND (?='' OR project=? COLLATE NOCASE) AND (?='' OR last_seen_at<? OR (last_seen_at=? AND (lower(handle)>? OR (lower(handle)=? AND id>?)))) ORDER BY last_seen_at DESC,lower(handle),id LIMIT ?"
+	rows, e := a.read.QueryContext(ctx, query, req.IncludeRetired, req.Search, req.Search, req.Search, req.Search, req.Search, req.Project, req.Project, p[0], seen, seen, p[1], p[1], p[2], req.Limit+1)
 	if e != nil {
 		return app.Page[domain.Agent]{}, e
 	}
@@ -181,7 +188,7 @@ func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now 
 	if len(out.Items) > req.Limit {
 		last := out.Items[req.Limit-1]
 		out.Items = out.Items[:req.Limit]
-		out.NextCursor = encodeCursor(strings.ToLower(last.Handle), string(last.ID))
+		out.NextCursor = encodeCursor(strconv.FormatInt(micros(last.LastSeenAt), 10), strings.ToLower(last.Handle), string(last.ID))
 	}
 	return out, nil
 }

@@ -350,7 +350,7 @@ func (h *Handler) agents(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Agents(r.Context(), app.AgentListRequest{PageRequest: p, IncludeRetired: boolQuery(r, "include_retired")})
+	v, e := h.app.Agents(r.Context(), app.AgentListRequest{PageRequest: p, IncludeRetired: boolQuery(r, "include_retired"), Search: r.URL.Query().Get("search"), Project: r.URL.Query().Get("project")})
 	h.respond(w, v, e)
 }
 
