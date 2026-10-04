@@ -113,10 +113,13 @@ func AgentInstructions() Instructions {
 		Purpose: "Exchange short-lived messages and pointers among independent local agent sessions.",
 		Guarantees: []string{
 			"A successful publish has been accepted into the authoritative store.",
+			"Publishing requires an existing follow: run comms topic follow TOPIC first; publishing does not follow implicitly.",
 			"Inbox, peek, thread, search, receipts, observe, and both wait operations do not advance read cursors.",
 			"The inbox excludes your own messages by default so it shows incoming work; --include-self restores them, and every other surface always retains them.",
 			"Waiting is bounded: it returns a match, times out, or reports cancellation, and never blocks forever.",
 			"Read-through advances one topic cursor through the named message and acknowledges all earlier visible sequences.",
+			"Use comms read-through --all to acknowledge current messages across active followed topics, or --before CURSOR for an inclusive time bound. This covers all followed topics, regardless of wait filters or inbox pagination.",
+			"Wait continuation and read cursors are independent: in a watcher loop pass the returned after as --after on the next wait, then explicitly acknowledge handled messages. Without --after, preexisting unread messages return immediately.",
 			"Inbox bodies are previews by default: triage from them, peek or thread what you will act on, and still read-through to acknowledge, because retrieval is recorded but is not an acknowledgment.",
 			"Stable record IDs do not change when friendly handles or topic names change.",
 			"Structured responses, error codes, and cursor meanings follow versioned compatibility contracts.",
@@ -136,6 +139,8 @@ func AgentInstructions() Instructions {
 			"comms --timeout 30s agent wait @publisher --json && comms send @publisher --title 'Briefing' --body 'Start with td-123abc.'",
 			"comms --timeout 2m wait --from @publisher --thread msg_example --json",
 			"comms read-through msg_example --json",
+			"comms wait --after RETURNED_AFTER_CURSOR --json",
+			"comms read-through --all --before RETURNED_AFTER_CURSOR --json",
 		},
 		Commands: commands,
 	}
@@ -280,14 +285,18 @@ func CommandHelp(program string, commandArgs ...string) (string, error) {
 	// 1. Longest command prefix match against registered operations
 	for prefixLen := len(tokens); prefixLen >= 1; prefixLen-- {
 		prefix := strings.Join(tokens[:prefixLen], " ")
+		var matches []string
 		for _, op := range operations {
 			if op.CLI == "" {
 				continue
 			}
 			opTokens := extractCommandTokens(op.CLI)
 			if strings.Join(opTokens, " ") == prefix {
-				return renderOperationHelp(program, op), nil
+				matches = append(matches, renderOperationHelp(program, op))
 			}
+		}
+		if len(matches) > 0 {
+			return strings.Join(matches, "\n"), nil
 		}
 	}
 

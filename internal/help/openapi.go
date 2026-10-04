@@ -231,6 +231,8 @@ func responseType(id string) reflect.Type {
 		value = app.MessageWaitResponse{}
 	case "message.read_through":
 		value = app.ReadThroughResponse{}
+	case "message.read_through_all":
+		value = app.ReadThroughAllResponse{}
 	case "message.receipts":
 		value = app.ReceiptReport{}
 	case "retention.status":

@@ -68,7 +68,7 @@ func (a *Adapter) Publish(ctx context.Context, p app.PreparedMessage) (domain.Me
 			return domain.Message{}, e
 		}
 		if active == 0 {
-			return domain.Message{}, fmt.Errorf("%w: author does not follow topic", app.ErrConflict)
+			return domain.Message{}, fmt.Errorf("%w: author does not follow topic %q; run comms topic follow %s before publishing or replying", app.ErrConflict, topic.Name, topic.ID)
 		}
 		return insertMessage(ctx, tx, p, author, topic, nil)
 	})
@@ -160,7 +160,7 @@ func (a *Adapter) Reply(ctx context.Context, p app.PreparedMessage) (domain.Mess
 			return domain.Message{}, e
 		}
 		if active == 0 {
-			return domain.Message{}, fmt.Errorf("%w: author does not follow topic", app.ErrConflict)
+			return domain.Message{}, fmt.Errorf("%w: author does not follow topic %q; run comms topic follow %s before publishing or replying", app.ErrConflict, topic.Name, topic.ID)
 		}
 		return insertMessage(ctx, tx, p, author, topic, &parent)
 	})
@@ -668,4 +668,87 @@ func prefixedAgentCols(alias string) string {
 		parts[i] = alias + "." + parts[i]
 	}
 	return strings.Join(parts, ",")
+}
+
+// ReadThroughAll captures high-water marks inside the serialized writer transaction.
+// A time cursor bounds a contiguous sequence prefix, so a later arrival cannot
+// be skipped over even when timestamps or IDs sort differently from sequences.
+func (a *Adapter) ReadThroughAll(ctx context.Context, req app.ReadThroughAllRequest, now time.Time) (app.ReadThroughAllResponse, error) {
+	stamp, id, e := pairCursor(req.Before)
+	if e != nil {
+		return app.ReadThroughAllResponse{}, e
+	}
+	if req.Before != "" && (stamp <= 0 || id == "") {
+		return app.ReadThroughAllResponse{}, fmt.Errorf("%w: malformed before cursor", domain.ErrInvalid)
+	}
+	if req.Before != "" {
+		if _, e := domain.ParseMessageID(id); e != nil {
+			return app.ReadThroughAllResponse{}, fmt.Errorf("%w: malformed before cursor", domain.ErrInvalid)
+		}
+	}
+	return withMutation(ctx, a, req.Mutation, "read_through_all", now, func(tx *sql.Tx) (app.ReadThroughAllResponse, error) {
+		out := app.ReadThroughAllResponse{Subscriptions: []app.ReadThroughResponse{}}
+		ag, e := resolveAgent(ctx, tx, req.Agent, now)
+		if e != nil {
+			return out, e
+		}
+		rows, e := tx.QueryContext(ctx, "SELECT "+subscriptionCols+" FROM subscriptions WHERE agent_id=? AND unfollowed_at IS NULL ORDER BY topic_id", ag.ID)
+		if e != nil {
+			return out, e
+		}
+		var subs []domain.Subscription
+		for rows.Next() {
+			sub, err := scanSubscription(rows)
+			if err != nil {
+				_ = rows.Close()
+				return out, err
+			}
+			subs = append(subs, sub)
+		}
+		e = rows.Err()
+		_ = rows.Close()
+		if e != nil {
+			return out, e
+		}
+		for _, sub := range subs {
+			var high int64
+			e = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(sequence),0) FROM messages WHERE topic_id=?", sub.TopicID).Scan(&high)
+			if e != nil {
+				return out, e
+			}
+			if req.Before != "" {
+				var firstLater sql.NullInt64
+				e = tx.QueryRowContext(ctx, "SELECT MIN(sequence) FROM messages WHERE topic_id=? AND sequence>? AND (created_at>? OR (created_at=? AND id>?))", sub.TopicID, sub.ReadThroughSequence, stamp, stamp, id).Scan(&firstLater)
+				if e != nil {
+					return out, e
+				}
+				if firstLater.Valid {
+					high = firstLater.Int64 - 1
+				}
+			}
+			result := app.ReadThroughResponse{Subscription: sub, PreviousSequence: sub.ReadThroughSequence, NewSequence: sub.ReadThroughSequence}
+			if high > sub.ReadThroughSequence {
+				e = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE topic_id=? AND sequence>? AND sequence<=? AND (expires_at IS NULL OR expires_at>?)", sub.TopicID, sub.ReadThroughSequence, high, micros(now)).Scan(&result.NewlyAcknowledged)
+				if e != nil {
+					return out, e
+				}
+				_, e = tx.ExecContext(ctx, "UPDATE subscriptions SET read_through_sequence=?,read_through_at=?,updated_at=? WHERE agent_id=? AND topic_id=?", high, micros(now), micros(now), ag.ID, sub.TopicID)
+				if e != nil {
+					return out, e
+				}
+				_, e = tx.ExecContext(ctx, "INSERT INTO subscription_read_advances(agent_id,topic_id,through_sequence,read_at) VALUES(?,?,?,?)", ag.ID, sub.TopicID, high, micros(now))
+				if e != nil {
+					return out, e
+				}
+				sub.ReadThroughSequence = high
+				sub.ReadThroughAt = &now
+				sub.UpdatedAt = now
+				result.Subscription = sub
+				result.NewSequence = high
+			}
+			out.Subscriptions = append(out.Subscriptions, result)
+			out.NewlyAcknowledged += result.NewlyAcknowledged
+		}
+		return out, nil
+	})
 }

@@ -755,3 +755,36 @@ func runCode(t *testing.T, socket string, environment map[string]string, args ..
 	code := Run(Env{Args: full, Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, Getenv: func(key string) string { return environment[key] }})
 	return code, stderr.String()
 }
+
+func TestReadThroughAllDirectTopics(t *testing.T) {
+	dir, socket := startDaemon(t)
+	paths := map[string]string{}
+	for _, handle := range []string{"reader", "sender-one", "sender-two"} {
+		paths[handle] = filepath.Join(dir, handle+".json")
+		runJSON(t, socket, nil, "join", handle, "--context", paths[handle])
+	}
+	reader := map[string]string{"COMMS_CONTEXT": paths["reader"]}
+	for _, handle := range []string{"sender-one", "sender-two"} {
+		runJSON(t, socket, map[string]string{"COMMS_CONTEXT": paths[handle]}, "send", "@reader", "--title", "work", "--body", "first")
+	}
+	waited := runJSON(t, socket, reader, "wait", "--limit", "2")
+	cursor := stringValue(t, waited, "after")
+	runJSON(t, socket, map[string]string{"COMMS_CONTEXT": paths["sender-one"]}, "send", "@reader", "--title", "later", "--body", "second")
+	ack := runJSON(t, socket, reader, "read-through", "--all", "--before", cursor)
+	if ack["newly_acknowledged"] != float64(2) {
+		t.Fatalf("ack=%#v", ack)
+	}
+	box := runJSON(t, socket, reader, "inbox", "--unread")
+	if len(arrayValue(t, box, "items")) != 1 {
+		t.Fatalf("bounded unread=%#v", box)
+	}
+	resumed := runJSON(t, socket, reader, "wait", "--after", cursor)
+	if len(arrayValue(t, resumed, "items")) != 1 {
+		t.Fatalf("resumed=%#v", resumed)
+	}
+	runJSON(t, socket, reader, "read-through", "--all")
+	box = runJSON(t, socket, reader, "inbox", "--unread")
+	if len(arrayValue(t, box, "items")) != 0 {
+		t.Fatalf("all unread=%#v", box)
+	}
+}

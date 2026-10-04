@@ -120,6 +120,7 @@ func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
 	mux.HandleFunc("GET /v1/messages/{message}/thread", h.thread)
 	mux.HandleFunc("GET /v1/messages/{message}", h.peek)
 	mux.HandleFunc("POST /v1/messages/{message}/read-through", h.readThrough)
+	mux.HandleFunc("POST /v1/read-through", h.readThroughAll)
 	mux.HandleFunc("GET /v1/messages/{message}/receipts", h.receipts)
 	mux.HandleFunc("GET /v1/search", h.search)
 	mux.HandleFunc("GET /v1/observe", h.observe)
@@ -598,6 +599,19 @@ func (h *Handler) readThrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, e := h.app.ReadThrough(r.Context(), app.ReadThroughRequest{Mutation: m, Agent: agent, Message: r.PathValue("message")})
+	h.respond(w, v, e)
+}
+func (h *Handler) readThroughAll(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	var req app.ReadThroughAllRequest
+	if !h.decodeOptional(w, r, &req) {
+		return
+	}
+	req.Agent = agent
+	v, e := h.app.ReadThroughAll(r.Context(), req)
 	h.respond(w, v, e)
 }
 func (h *Handler) receipts(w http.ResponseWriter, r *http.Request) {

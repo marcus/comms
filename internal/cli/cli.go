@@ -225,7 +225,7 @@ func (r *runner) run(args []string) error {
 	case "peek":
 		return r.oneMessageGet(args[1:], "")
 	case "read-through":
-		return r.oneMessagePost(args[1:], "/read-through")
+		return r.readThrough(args[1:])
 	case "receipts":
 		return r.receipts(args[1:])
 	case "thread":
@@ -862,6 +862,21 @@ func (r *runner) oneMessageGet(args []string, suffix string) error {
 	}
 	return r.get("/v1/messages/"+url.PathEscape(args[0])+suffix, nil, false)
 }
+func (r *runner) readThrough(args []string) error {
+	if len(args) == 1 && !strings.HasPrefix(args[0], "--") {
+		return r.oneMessagePost(args, "/read-through")
+	}
+	fs := newFlagSet("read-through")
+	all := fs.Bool("all", false, "")
+	before := fs.String("before", "", "")
+	if e := fs.Parse(args); e != nil {
+		return usage(e.Error())
+	}
+	if !*all || fs.NArg() != 0 {
+		return usage("read-through requires MESSAGE_ID or --all [--before CURSOR]")
+	}
+	return r.mutate(http.MethodPost, "/v1/read-through", map[string]any{"all": true, "before": *before}, true)
+}
 func (r *runner) oneMessagePost(args []string, suffix string) error {
 	if len(args) != 1 {
 		return usage("command requires one MESSAGE_ID")
@@ -1086,6 +1101,10 @@ func renderHuman(w io.Writer, value any, compact bool) error {
 				_, err := fmt.Fprintf(w, "%s\t%s\n", name, id)
 				return err
 			}
+		}
+		if subscriptions, ok := v["subscriptions"].([]any); ok {
+			_, err := fmt.Fprintf(w, "acknowledged %v messages across %d followed topics\n", v["newly_acknowledged"], len(subscriptions))
+			return err
 		}
 		if through, ok := v["new_sequence"]; ok {
 			_, err := fmt.Fprintf(w, "read through %v (was %v; acknowledged %v)\n", through, v["previous_sequence"], v["newly_acknowledged"])

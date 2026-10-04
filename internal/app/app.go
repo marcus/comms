@@ -324,6 +324,16 @@ type ReadThroughRequest struct {
 	Agent   string `json:"agent"`
 	Message string `json:"message"`
 }
+type ReadThroughAllRequest struct {
+	Mutation
+	Agent  string `json:"agent"`
+	All    bool   `json:"all"`
+	Before string `json:"before,omitempty"`
+}
+type ReadThroughAllResponse struct {
+	Subscriptions     []ReadThroughResponse `json:"subscriptions"`
+	NewlyAcknowledged int64                 `json:"newly_acknowledged"`
+}
 type ReadThroughResponse struct {
 	Subscription      domain.Subscription `json:"subscription"`
 	PreviousSequence  int64               `json:"previous_sequence"`
@@ -486,6 +496,7 @@ type MessageStore interface {
 	Thread(context.Context, ThreadRequest, time.Time) (Page[domain.Message], error)
 	Peek(context.Context, string, time.Time) (domain.Message, error)
 	ReadThrough(context.Context, ReadThroughRequest, time.Time) (ReadThroughResponse, error)
+	ReadThroughAll(context.Context, ReadThroughAllRequest, time.Time) (ReadThroughAllResponse, error)
 	Receipts(context.Context, string, time.Time) (ReceiptReport, error)
 	RecordRetrievals(context.Context, []RetrievalEvent) error
 	Search(context.Context, SearchRequest, time.Time) (Page[domain.Message], error)
@@ -1010,6 +1021,15 @@ func (s *Service) ReadThrough(ctx context.Context, req ReadThroughRequest) (Read
 		return ReadThroughResponse{}, requiredErr("agent and message")
 	}
 	return s.messageStore.ReadThrough(ctx, req, s.clock.Now())
+}
+func (s *Service) ReadThroughAll(ctx context.Context, req ReadThroughAllRequest) (ReadThroughAllResponse, error) {
+	if e := req.Validate(); e != nil {
+		return ReadThroughAllResponse{}, e
+	}
+	if req.Agent == "" || !req.All {
+		return ReadThroughAllResponse{}, requiredErr("agent and all=true")
+	}
+	return s.messageStore.ReadThroughAll(ctx, req, s.clock.Now())
 }
 func (s *Service) Receipts(ctx context.Context, message string) (ReceiptReport, error) {
 	if message == "" {
