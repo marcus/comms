@@ -1,6 +1,6 @@
 # Overnight coordination feedback
 
-Deliver the eight verified Comms tickets as additive v1.5.0. Independent Sol
+Implementation completed for the eight verified Comms tickets; publish as additive v1.5.0. Independent Sol
 worktrees own implementation groups; one integration worktree resolves shared
 CLI, application, registry, and store edits. Keep the existing checkout's
 untracked diagrams and all live Comms identities, topics, and inboxes untouched.
@@ -44,5 +44,12 @@ untracked diagrams and all live Comms identities, topics, and inboxes untouched.
 
 Baseline: `eb0e869` / v1.4.0 on `marcus/comms` main, aerie. All eight ticket
 records resolve. The existing `comms-web` sibling is the web consumer; there is
-no separate comms-ui checkout. Implementation and release evidence will be
-recorded in td and the completed plan.
+no separate comms-ui checkout. Implementation evidence is recorded below; publication and installed-consumer evidence are tracked in `td-71b65f`.
+
+Verified implementation candidate: `d395344`. `make check` passed, including the
+complete race suite, vet, and lint with zero issues; `git diff --check` passed.
+Independent Sol review `review-comms-overnight` / `ses_4fb604` is clean for every
+story and the retired-reader fix `td-b64ab9`. Real temporary-store CLI smoke
+verified kind filters, full bodies, wait continuation, bounded/all acknowledgement,
+activity cleanup, discovery, suggestions, follow recovery, and optional titles.
+Comms Web receipt tests passed 7/7 and its existing contract remains compatible.
