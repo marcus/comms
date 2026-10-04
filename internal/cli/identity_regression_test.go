@@ -97,9 +97,12 @@ func TestJoinReconnectRefreshesContextAgentLastSeen(t *testing.T) {
 	_, socket := startDaemon(t)
 	state := t.TempDir()
 	env := map[string]string{"COMMS_STATE_DIR": state, "COMMS_SESSION": "resuming"}
-	first := runJSON(t, socket, env, "join", "resuming")
-	before := mapValue(t, first, "agent")
-	other := runJSON(t, socket, nil, "join", "other", "--context", filepath.Join(state, "other.json"))
+	runJSON(t, socket, env, "join", "resuming")
+	runJSON(t, socket, nil, "join", "other", "--context", filepath.Join(state, "other.json"))
+	// Read both baselines back from SQLite: fresh join responses retain clock
+	// nanoseconds, while persisted timestamps have microsecond precision.
+	before := runJSON(t, socket, nil, "agent", "get", "resuming")
+	other := runJSON(t, socket, nil, "agent", "get", "other")
 	// Model a resumed context while ambient identity overrides point elsewhere.
 	env["COMMS_AGENT_ID"] = "other"
 	resumedAt := time.Now().UTC()
@@ -120,7 +123,7 @@ func TestJoinReconnectRefreshesContextAgentLastSeen(t *testing.T) {
 	// Operator retrieval does not touch activity; the ambient agent must retain
 	// its prior timestamp while the context-selected agent was refreshed.
 	listed := runJSON(t, socket, nil, "agent", "get", "other")
-	if listed["last_seen_at"] != mapValue(t, other, "agent")["last_seen_at"] {
+	if listed["last_seen_at"] != other["last_seen_at"] {
 		t.Fatalf("reconnect touched ambient agent: %#v", listed)
 	}
 }
