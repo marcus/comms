@@ -393,33 +393,46 @@ func (r *runner) join(args []string) error {
 	if err != nil {
 		return err
 	}
-	// An implicit context may be shared with other agents (the machine-wide
-	// file, or one tmux pane running several). Switching it to a different
-	// agent would silently change who every one of them is, so that needs
-	// --replace. Only a join by external reference can land on the agent the
-	// context already holds; any other join registers a new agent, so it is
-	// refused before it creates one.
+	// A matching active context is evidence for reconnecting this identity.
+	// A handle alone is not: another session may already own it.
 	var current domain.Agent
-	takeover := false
-	if implicit && !*replace && record.AgentID != "" {
-		current, takeover, err = r.activeContextAgent(client, record.AgentID)
+	active := false
+	if record.AgentID != "" {
+		current, active, err = r.activeContextAgent(client, record.AgentID)
 		if err != nil {
 			return err
 		}
-		if takeover && *extNS == "" {
-			return r.contextTakeoverError(current, handle, source)
-		}
 	}
-	if err = r.do(client, http.MethodPost, "/v1/agents/join", nil, req, &response); err != nil {
+	reconnect := active && *extNS == "" && strings.EqualFold(handle, current.Handle)
+	takeover := implicit && !*replace && active
+	if takeover && *extNS == "" && !reconnect {
+		return r.contextTakeoverError(current, handle, source)
+	}
+	if reconnect {
+		body := map[string]any{"client_id": record.ClientID, "request_id": requestID}
+		for key, value := range map[string]string{"display_name": *display, "purpose": *purpose, "harness": *harness, "project": *project, "session_ref": *sessionRef} {
+			if value != "" {
+				body[key] = value
+			}
+		}
+		err = r.do(client, http.MethodPatch, "/v1/agents/"+url.PathEscape(record.AgentID), nil, body, &response.Agent)
+		response.Rejoined = true
+	} else {
+		err = r.do(client, http.MethodPost, "/v1/agents/join", nil, req, &response)
+	}
+	if err != nil {
+		if errors.Is(err, app.ErrConflict) && handle != "" {
+			return fmt.Errorf("%w; to reconnect @%s, reuse its original --context/COMMS_CONTEXT or external reference; use --as %s for existing-identity commands, or choose a different handle", err, handle, handle)
+		}
 		return err
 	}
 	if takeover && record.AgentID != string(response.Agent.ID) {
 		return r.contextTakeoverError(current, response.Agent.Handle, source)
 	}
 	record.AgentID = string(response.Agent.ID)
-	record.Harness = *harness
-	record.Project = *project
-	record.SessionRef = *sessionRef
+	record.Harness = response.Agent.Harness
+	record.Project = response.Agent.Project
+	record.SessionRef = response.Agent.SessionRef
 	if err = writeContext(*contextPath, record); err != nil {
 		return fmt.Errorf("write context: %w", err)
 	}

@@ -110,7 +110,9 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 All commands return human-readable text by default, or structured JSON with `--json`.
 
 ### Identity & Sessions
-- `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH] [--replace]`: Register or reconnect a session context. Without `--context` or `COMMS_CONTEXT`, the identity is stored per terminal session: per `COMMS_SESSION` value when set, else per tmux pane, else in one machine-wide file. Join refuses to switch that implicit identity to a different active agent unless you pass `--replace`, so concurrent agents cannot silently take over each other's identity.
+- `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH] [--replace]`: Register or reconnect a session context. Without `--context` or `COMMS_CONTEXT`, the identity is stored per terminal session: per `COMMS_SESSION` value when set, else per `CODEX_THREAD_ID` conversation, else per tmux pane, else in one machine-wide file. Join refuses to switch that implicit identity to a different active agent unless you pass `--replace`, so concurrent agents cannot silently take over each other's identity.
+  Repeating `join HANDLE` with the same active context reconnects that agent and returns `rejoined: true`. A handle alone cannot reconnect from a fresh context: reuse the original context or the same external namespace/key; use `--as HANDLE` for commands on an existing identity. `--replace` permits switching a context, but does not claim an existing handle.
+  Codex migration: conversations previously using a tmux or machine-wide context now select a separate conversation context. Run `comms join` with a new handle there, or set `COMMS_CONTEXT` to the original context path to retain the old identity. `COMMS_SESSION` still overrides conversation detection. `--as` overrides `COMMS_AGENT_ID`, which overrides context selection for identity-consuming commands.
 - `comms whoami`: Print the resolved active session and context source.
 - `comms agents`: List known agent sessions.
 - `comms agent get AGENT`: Inspect details of a specific agent.

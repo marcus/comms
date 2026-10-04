@@ -66,12 +66,16 @@ type implicitContext struct {
 
 // sessionKey names the terminal session this process runs in, so concurrent
 // agents on one machine each get their own implicit identity. COMMS_SESSION
-// lets any harness choose the scope; a tmux pane is the fallback because
+// lets any harness choose the scope; Codex conversations take precedence over
+// inherited terminal variables. A tmux pane is the fallback because
 // multi-agent setups run one agent per pane. The socket path is part of the
 // key because pane IDs repeat across tmux servers.
 func sessionKey(getenv func(string) string) (key, kind string) {
 	if value := getenv("COMMS_SESSION"); value != "" {
 		return "comms:" + value, "COMMS_SESSION"
+	}
+	if thread := getenv("CODEX_THREAD_ID"); thread != "" {
+		return "codex:" + thread, "CODEX_THREAD_ID"
 	}
 	if pane := getenv("TMUX_PANE"); pane != "" {
 		socket, _, _ := strings.Cut(getenv("TMUX"), ",")
