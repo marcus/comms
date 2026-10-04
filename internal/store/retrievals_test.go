@@ -150,6 +150,46 @@ func TestRecordRetrievalsEscalatesDepthAndSkipsAuthorsAndUnknownReaders(t *testi
 	}
 }
 
+func TestRecordRetrievalsSkipsRetiredReadersWithoutFailingActiveReaders(t *testing.T) {
+	sys := newTestSystem(t)
+	ctx := context.Background()
+	author := join(t, sys.service, "author", nil)
+	active := join(t, sys.service, "active", nil)
+	retired := join(t, sys.service, "retired", nil)
+	topic := createTopic(t, sys.service, "build")
+	follow(t, sys.service, author, topic)
+	message, err := sys.service.Publish(ctx, app.PublishRequest{Author: "author", Topic: "build", Title: "one", Body: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.service.RetireAgent(ctx, app.RetireAgentRequest{Agent: string(retired.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	// Both stable IDs and handles must be ignored, including repeated entries
+	// that use the batch's resolution cache. Active readers still count.
+	var events []app.RetrievalEvent
+	for _, ref := range []string{string(retired.ID), retired.Handle, string(retired.ID), retired.Handle, string(active.ID)} {
+		events = append(events, app.RetrievalEvent{MessageID: message.ID, Agent: ref, Depth: app.RetrievalFull, At: sys.clock.Now()})
+	}
+	if err := sys.adapter.RecordRetrievals(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, found := retrievalRow(t, sys.adapter, message.ID, retired.ID); found {
+		t.Fatal("retired reader retrieval was recorded")
+	}
+	if _, _, inspected, count, found := retrievalRow(t, sys.adapter, message.ID, active.ID); !found || !inspected.Valid || count != 1 {
+		t.Fatalf("active reader row=%#v %d %v", inspected, count, found)
+	}
+	// Retired identity headers remain valid for reads; only attribution stops.
+	if got, err := sys.service.Peek(ctx, app.PeekRequest{Message: string(message.ID), Agent: string(retired.ID)}); err != nil || got.Body != "body" {
+		t.Fatalf("retired reader peek=%#v err=%v", got, err)
+	}
+	sys.service.Close()
+	if _, _, _, _, found := retrievalRow(t, sys.adapter, message.ID, retired.ID); found {
+		t.Fatal("retired reader peek recorded a retrieval")
+	}
+}
+
 func TestReceiptsReportSeparatesSubscribersFromInspectors(t *testing.T) {
 	sys := newTestSystem(t)
 	ctx := context.Background()

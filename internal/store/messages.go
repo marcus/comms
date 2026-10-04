@@ -563,7 +563,7 @@ const retrievalUpsert = "INSERT INTO message_retrievals(message_id,agent_id,firs
 	" seen_count=message_retrievals.seen_count+1"
 
 // RecordRetrievals writes one coalesced batch of retrieval observations. Agent
-// references are resolved inside the transaction and unknown ones are skipped
+// references are resolved inside the transaction and unknown or retired ones are skipped
 // rather than failing the batch, because a read must never fail because its
 // bookkeeping could not be attributed. A message the reader wrote is skipped by
 // the statement itself, as is a message that no longer exists.
@@ -583,6 +583,10 @@ func (a *Adapter) RecordRetrievals(ctx context.Context, events []app.RetrievalEv
 					continue
 				case e != nil:
 					return struct{}{}, e
+				}
+				if agent.RetiredAt != nil {
+					resolved[event.Agent] = ""
+					continue
 				}
 				id = agent.ID
 				resolved[event.Agent] = id
