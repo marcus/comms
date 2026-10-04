@@ -192,7 +192,7 @@ func TestCommandHelpGolden(t *testing.T) {
 			name: "wait help golden",
 			args: []string{"wait", "--help"},
 			contains: []string{
-				"Usage:\n  comms wait [--from AGENT] [--thread MESSAGE_ID] [--after CURSOR] [--include-self] [--limit N] [--timeout DURATION]\n",
+				"Usage:\n  comms wait [--kind LABELS] [--from AGENT] [--thread MESSAGE_ID] [--after CURSOR] [--include-self] [--limit N] [--timeout DURATION]\n",
 				"Summary:\n  Wait for matching incoming messages\n",
 				"Preexisting unread matches return immediately",
 				"distinct from a subscription read cursor",

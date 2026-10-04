@@ -29,7 +29,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type Options struct {
 	Path            string

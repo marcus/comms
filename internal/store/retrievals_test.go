@@ -60,7 +60,7 @@ func TestMigrationRunnerUpgradesALegacyDatabaseInPlace(t *testing.T) {
 	if e = adapter.read.QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); e != nil {
 		t.Fatal(e)
 	}
-	if version != 2 {
+	if version != schemaVersion {
 		t.Fatalf("schema version after migration=%d", version)
 	}
 	var retained string
@@ -72,7 +72,7 @@ func TestMigrationRunnerUpgradesALegacyDatabaseInPlace(t *testing.T) {
 		t.Fatalf("message_retrievals missing after migration: %v", e)
 	}
 	report, e := adapter.Doctor(context.Background())
-	if e != nil || !report.Healthy || report.Checks["schema_version"] != "2" {
+	if e != nil || !report.Healthy || report.Checks["schema_version"] != "3" {
 		t.Fatalf("doctor=%#v %v", report, e)
 	}
 }

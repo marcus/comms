@@ -14,7 +14,7 @@ import (
 	"github.com/marcus/comms/internal/domain"
 )
 
-const messageCols = "id,topic_id,sequence,author_id,author_context_json,title,body,in_reply_to,thread_root_id,created_at,expires_at,metadata_json"
+const messageCols = "id,topic_id,sequence,author_id,author_context_json,title,body,in_reply_to,thread_root_id,created_at,expires_at,metadata_json,kind"
 
 func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var m domain.Message
@@ -22,7 +22,7 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var parent, metadata sql.NullString
 	var created int64
 	var expires sql.NullInt64
-	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata)
+	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind)
 	if e != nil {
 		return m, e
 	}
@@ -175,7 +175,7 @@ func insertMessage(ctx context.Context, tx *sql.Tx, p app.PreparedMessage, autho
 	if e != nil {
 		return domain.Message{}, e
 	}
-	m := domain.Message{ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
+	m := domain.Message{ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Kind: p.Kind, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
 	var parentID any
 	if parent != nil {
 		v := parent.ID
@@ -186,7 +186,7 @@ func insertMessage(ctx context.Context, tx *sql.Tx, p app.PreparedMessage, autho
 	if e = m.Validate(parent != nil); e != nil {
 		return domain.Message{}, e
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO messages("+messageCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", m.ID, m.TopicID, m.Sequence, m.AuthorID, string(ctxJSON), m.Title, m.Body, parentID, m.ThreadRootID, micros(m.CreatedAt), nullableMicros(m.ExpiresAt), rawJSON(m.Metadata)); e != nil {
+	if _, e = tx.ExecContext(ctx, "INSERT INTO messages("+messageCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", m.ID, m.TopicID, m.Sequence, m.AuthorID, string(ctxJSON), m.Title, m.Body, parentID, m.ThreadRootID, micros(m.CreatedAt), nullableMicros(m.ExpiresAt), rawJSON(m.Metadata), m.Kind); e != nil {
 		return domain.Message{}, e
 	}
 	if _, e = tx.ExecContext(ctx, "INSERT INTO messages_fts(message_id,title,body) VALUES(?,?,?)", m.ID, m.Title, m.Body); e != nil {
@@ -279,11 +279,11 @@ func ascendingCursor(v string) (int64, string, error)  { return pairCursor(v) }
 // SQL statement, before LIMIT and cursor construction, so excluded messages
 // never consume a page slot and pagination stays complete and stable.
 func inboxVisible(alias string) string {
-	return "(" + alias + ".expires_at IS NULL OR " + alias + ".expires_at>?) AND (?=0 OR " + alias + ".sequence>s.read_through_sequence) AND (?=1 OR " + alias + ".author_id<>?)"
+	return "(" + alias + ".expires_at IS NULL OR " + alias + ".expires_at>?) AND (?=0 OR " + alias + ".sequence>s.read_through_sequence) AND (?=1 OR " + alias + ".author_id<>?) AND " + kindPredicate(alias)
 }
 
 func inboxVisibleArgs(req app.MessageListRequest, agent domain.AgentID, now time.Time) []any {
-	return []any{micros(now), req.UnreadOnly, req.IncludeSelf, agent}
+	return []any{micros(now), req.UnreadOnly, req.IncludeSelf, agent, req.Kind, req.Kind}
 }
 
 func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now time.Time) (app.Page[domain.Message], error) {
@@ -318,7 +318,7 @@ func (a *Adapter) ResolveWait(ctx context.Context, req app.MessageWaitRequest, n
 	if e != nil {
 		return app.ResolvedWait{}, e
 	}
-	out := app.ResolvedWait{AgentID: ag.ID}
+	out := app.ResolvedWait{AgentID: ag.ID, Kind: req.Kind}
 	if req.From != "" {
 		from, e := resolveAgent(ctx, a.read, req.From, now)
 		if e != nil {
@@ -347,9 +347,9 @@ func (a *Adapter) MatchingMessages(ctx context.Context, req app.MessageWaitReque
 		" FROM messages m JOIN subscriptions s ON s.topic_id=m.topic_id AND s.agent_id=? AND s.unfollowed_at IS NULL" +
 		" WHERE (m.expires_at IS NULL OR m.expires_at>?) AND m.sequence>s.read_through_sequence" +
 		" AND (?=1 OR m.author_id<>?) AND (?='' OR m.author_id=?) AND (?='' OR m.thread_root_id=?)" +
-		" AND (?=0 OR m.created_at>? OR (m.created_at=? AND m.id>?))" +
+		" AND " + kindPredicate("m") + " AND (?=0 OR m.created_at>? OR (m.created_at=? AND m.id>?))" +
 		" ORDER BY m.created_at,m.id LIMIT ?"
-	args := []any{resolved.AgentID, micros(now), req.IncludeSelf, resolved.AgentID, resolved.FromID, resolved.FromID, resolved.ThreadRootID, resolved.ThreadRootID, stamp, stamp, stamp, id, req.Limit}
+	args := []any{resolved.AgentID, micros(now), req.IncludeSelf, resolved.AgentID, resolved.FromID, resolved.FromID, resolved.ThreadRootID, resolved.ThreadRootID, req.Kind, req.Kind, stamp, stamp, stamp, id, req.Limit}
 	rows, e := a.read.QueryContext(ctx, query, args...)
 	if e != nil {
 		return app.MessageWaitResponse{}, e
@@ -751,4 +751,9 @@ func (a *Adapter) ReadThroughAll(ctx context.Context, req app.ReadThroughAllRequ
 		}
 		return out, nil
 	})
+}
+
+// Delimiters make membership exact; labels cannot contain commas.
+func kindPredicate(alias string) string {
+	return "(?='' OR instr(',' || ? || ',', ',' || " + alias + ".kind || ',')>0)"
 }

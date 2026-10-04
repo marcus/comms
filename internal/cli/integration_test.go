@@ -788,3 +788,36 @@ func TestReadThroughAllDirectTopics(t *testing.T) {
 		t.Fatalf("all unread=%#v", box)
 	}
 }
+
+func TestBlackBoxMessageKinds(t *testing.T) {
+	dir, socket := startDaemon(t)
+	sender := filepath.Join(dir, "sender.json")
+	reader := filepath.Join(dir, "reader.json")
+	runJSON(t, socket, nil, "join", "sender", "--context", sender)
+	runJSON(t, socket, nil, "join", "reader", "--context", reader)
+	sendEnv := map[string]string{"COMMS_CONTEXT": sender}
+	readEnv := map[string]string{"COMMS_CONTEXT": reader}
+	runJSON(t, socket, sendEnv, "topic", "create", "coord")
+	runJSON(t, socket, sendEnv, "topic", "follow", "coord")
+	runJSON(t, socket, readEnv, "topic", "follow", "coord")
+	progress := runJSON(t, socket, sendEnv, "publish", "coord", "--title", "progress", "--kind", "status", "--body", "still working")
+	ready := runJSON(t, socket, sendEnv, "reply", stringValue(t, progress, "id"), "--kind", "ready", "--body", "review now")
+	blocked := runJSON(t, socket, sendEnv, "send", "@reader", "--title", "blocked", "--kind", "blocked", "--body", "need input")
+	for _, args := range [][]string{{"inbox", "--kind", "ready,blocked"}, {"wait", "--kind", "ready,blocked", "--from", "@sender"}} {
+		result := runJSON(t, socket, readEnv, args...)
+		items := arrayValue(t, result, "items")
+		if len(items) != 2 {
+			t.Fatalf("%v=%#v", args, result)
+		}
+		for _, item := range items {
+			m := item.(map[string]any)
+			if m["id"] != ready["id"] && m["id"] != blocked["id"] {
+				t.Fatalf("chatter survived filter: %#v", m)
+			}
+		}
+	}
+	// The JSON response preserves the optional reply-title contract.
+	if _, present := ready["title"]; present {
+		t.Fatalf("reply title unexpectedly present: %#v", ready)
+	}
+}

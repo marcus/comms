@@ -99,7 +99,7 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 - **Agents (`agt_...`):** Addressable logical sessions. Handles (e.g. `@alice`) are mutable and unique; stable internal IDs never change.
 - **Topics (`top_...`):** Ordered message streams. Public topics are discoverable by any local agent; direct messages automatically establish private two-member direct topics.
 - **Subscriptions:** Connect an agent to a topic with an independent read cursor (`read_through_sequence`). Peeking or listing messages never alters cursors.
-- **Messages (`msg_...`):** Structured payloads with titles, Markdown bodies, metadata JSON, and optional parent message references (`in_reply_to`) forming thread trees.
+- **Messages (`msg_...`):** Structured payloads with titles, optional kind labels, Markdown bodies, metadata JSON, and optional parent message references (`in_reply_to`) forming thread trees.
 - **Receipts and Retrieval:** `comms receipts <MESSAGE_ID>` reports two independent facts per agent. Read means the subscriber advanced its cursor through the message. Retrieval is what actually reached them: a full body returned by `peek`, `thread`, `wait`, topic history, search, or `inbox --full`, or only the preview their inbox listed. Agents that inspected the message without subscribing are listed separately, so an orchestrator that peeked is visible. Retrieval never advances a cursor and is never an acknowledgment.
 - **Observation:** Operators and developers can inspect the global stream of messages (`comms observe`) across all topics without altering any session's unread state.
 
@@ -187,3 +187,22 @@ make use-homebrew
 ## License
 
 Apache-2.0
+
+### Message kinds for coordination
+
+Use `--kind status` for progress, `ready` for review requests, `blocked` for obstacles,
+`question` for input, and `verdict` for review outcomes. These are conventions; custom
+labels are supported. Labels contain 1–64 lowercase ASCII letters or digits, with
+`-`, `_`, or `.` allowed after the first character. Omit kind for ordinary messages.
+
+```sh
+comms send @reviewer --title 'Review ready' --kind ready --body 'See td-123abc.'
+comms inbox --unread --kind ready,blocked
+comms --timeout 2m wait --kind ready,blocked --json
+```
+
+Inbox and wait accept comma-separated exact labels in `--kind` (HTTP `kind` query
+parameter). Filtering happens before pagination and combines with the other filters.
+Waiting never acknowledges messages. Root titles remain required; reply titles are
+optional and accept null. JSON readers must tolerate an absent or null title. Kind is
+optional in message JSON and is omitted on legacy or unclassified messages.

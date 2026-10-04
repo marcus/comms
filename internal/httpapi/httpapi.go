@@ -448,6 +448,7 @@ type messageWire struct {
 	app.Mutation
 	Topic        string          `json:"topic,omitempty"`
 	Agent        string          `json:"agent,omitempty"`
+	Kind         string          `json:"kind,omitempty"`
 	Title        string          `json:"title,omitempty"`
 	Body         string          `json:"body"`
 	ExpiresAt    *time.Time      `json:"expires_at,omitempty"`
@@ -481,7 +482,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Publish(r.Context(), app.PublishRequest{Mutation: x.Mutation, Author: author, Topic: x.Topic, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
+	v, e := h.app.Publish(r.Context(), app.PublishRequest{Mutation: x.Mutation, Author: author, Topic: x.Topic, Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
 	h.respond(w, v, e)
 }
 func (h *Handler) directSend(w http.ResponseWriter, r *http.Request) {
@@ -498,7 +499,7 @@ func (h *Handler) directSend(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.DirectSend(r.Context(), app.DirectSendRequest{Mutation: x.Mutation, Author: author, Recipient: x.Agent, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
+	v, e := h.app.DirectSend(r.Context(), app.DirectSendRequest{Mutation: x.Mutation, Author: author, Recipient: x.Agent, Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
 	h.respond(w, v, e)
 }
 func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
@@ -515,7 +516,7 @@ func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Reply(r.Context(), app.ReplyRequest{Mutation: x.Mutation, Author: author, Parent: r.PathValue("message"), Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
+	v, e := h.app.Reply(r.Context(), app.ReplyRequest{Mutation: x.Mutation, Author: author, Parent: r.PathValue("message"), Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
 	h.respond(w, v, e)
 }
 func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +529,7 @@ func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self"), Full: boolQuery(r, "full")})
+	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, Kind: r.URL.Query().Get("kind"), UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self"), Full: boolQuery(r, "full")})
 	h.respond(w, v, e)
 }
 func (h *Handler) waitAgent(w http.ResponseWriter, r *http.Request) {
@@ -558,6 +559,7 @@ func (h *Handler) waitMessages(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	v, e := h.app.WaitForMessages(r.Context(), app.MessageWaitRequest{
 		Agent:       agent,
+		Kind:        query.Get("kind"),
 		From:        query.Get("from"),
 		Thread:      query.Get("thread"),
 		After:       query.Get("after"),

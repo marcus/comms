@@ -723,6 +723,7 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 		args = args[:len(args)-1]
 	}
 	fs := newFlagSet(name)
+	kind := fs.String("kind", "", "")
 	title := fs.String("title", "", "")
 	body := fs.String("body", "", "")
 	bodyFile := fs.String("body-file", "", "")
@@ -767,6 +768,9 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 		return nil, err
 	}
 	result := map[string]any{"title": *title, "body": text}
+	if *kind != "" {
+		result["kind"] = *kind
+	}
 	expiryCount := 0
 	if *expiresAt != "" {
 		expiryCount++
@@ -802,6 +806,7 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 
 func (r *runner) inbox(args []string) error {
 	fs := newFlagSet("inbox")
+	kind := fs.String("kind", "", "")
 	unread := fs.Bool("unread", false, "")
 	threads := fs.Bool("threads", false, "")
 	includeSelf := fs.Bool("include-self", false, "")
@@ -819,6 +824,7 @@ func (r *runner) inbox(args []string) error {
 	set(q, "cursor", *cursor)
 	setBool(q, "unread", *unread)
 	setBool(q, "threads", *threads)
+	set(q, "kind", *kind)
 	setBool(q, "include_self", *includeSelf)
 	setBool(q, "full", *full)
 	return r.get("/v1/inbox", q, true)
@@ -844,6 +850,7 @@ func (r *runner) waitBound() (time.Duration, error) {
 
 func (r *runner) waitMessages(args []string) error {
 	fs := newFlagSet("wait")
+	kind := fs.String("kind", "", "")
 	from := fs.String("from", "", "")
 	thread := fs.String("thread", "", "")
 	after := fs.String("after", "", "")
@@ -864,6 +871,7 @@ func (r *runner) waitMessages(args []string) error {
 	set(q, "thread", *thread)
 	set(q, "after", *after)
 	setInt(q, "limit", *limit)
+	set(q, "kind", *kind)
 	setBool(q, "include_self", *includeSelf)
 	return r.get("/v1/wait", q, true)
 }

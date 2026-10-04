@@ -115,6 +115,7 @@ func AgentInstructions() Instructions {
 			"A successful publish has been accepted into the authoritative store.",
 			"Publishing requires an existing follow: run comms topic follow TOPIC first; publishing does not follow implicitly.",
 			"Inbox, peek, thread, search, receipts, observe, and both wait operations do not advance read cursors.",
+			"Use kind status for progress, ready for review, blocked for obstacles, question for input, and verdict for review outcomes. Custom lowercase labels are supported. Wait or inbox with --kind ready,blocked to skip chatter; filters match exact labels. Reply titles are optional and may be absent or null: never assume title is a string.",
 			"The inbox excludes your own messages by default so it shows incoming work; --include-self restores them, and every other surface always retains them.",
 			"Waiting is bounded: it returns a match, times out, or reports cancellation, and never blocks forever.",
 			"Read-through advances one topic cursor through the named message and acknowledges all earlier visible sequences.",

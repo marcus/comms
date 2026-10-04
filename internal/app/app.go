@@ -14,7 +14,7 @@ import (
 
 const (
 	ProtocolVersion = 1
-	SchemaVersion   = 2
+	SchemaVersion   = 3
 	DefaultLimit    = 50
 	MaxLimit        = 500
 	// InboxDefaultLimit keeps the attention surface small. The inbox is
@@ -203,6 +203,7 @@ type PublishRequest struct {
 	Mutation
 	Author   string          `json:"author"`
 	Topic    string          `json:"topic"`
+	Kind     string          `json:"kind,omitempty"`
 	Title    string          `json:"title"`
 	Body     string          `json:"body"`
 	Expiry   Expiry          `json:"expiry,omitempty"`
@@ -212,6 +213,7 @@ type DirectSendRequest struct {
 	Mutation
 	Author    string          `json:"author"`
 	Recipient string          `json:"recipient"`
+	Kind      string          `json:"kind,omitempty"`
 	Title     string          `json:"title"`
 	Body      string          `json:"body"`
 	Expiry    Expiry          `json:"expiry,omitempty"`
@@ -221,6 +223,7 @@ type ReplyRequest struct {
 	Mutation
 	Author   string          `json:"author"`
 	Parent   string          `json:"parent"`
+	Kind     string          `json:"kind,omitempty"`
 	Title    string          `json:"title,omitempty"`
 	Body     string          `json:"body"`
 	Expiry   Expiry          `json:"expiry,omitempty"`
@@ -235,6 +238,7 @@ type PreparedMessage struct {
 	Topic     string
 	Parent    string
 	Recipient string
+	Kind      string
 	Title     string
 	Body      string
 	ExpiresAt *time.Time
@@ -244,6 +248,7 @@ type PreparedMessage struct {
 
 type MessageListRequest struct {
 	PageRequest
+	Kind        string `json:"kind,omitempty"`
 	Agent       string `json:"agent,omitempty"`
 	Topic       string `json:"topic,omitempty"`
 	UnreadOnly  bool   `json:"unread_only,omitempty"`
@@ -277,9 +282,10 @@ type AgentWaitRequest struct {
 }
 
 // MessageWaitRequest awaits unread messages routed to Agent that match the
-// optional author and thread filters. Waiting never acknowledges anything.
+// optional author, thread, and kind filters. Waiting never acknowledges anything.
 type MessageWaitRequest struct {
 	Agent       string        `json:"agent"`
+	Kind        string        `json:"kind,omitempty"`
 	From        string        `json:"from,omitempty"`
 	Thread      string        `json:"thread,omitempty"`
 	After       string        `json:"after,omitempty"`
@@ -292,6 +298,7 @@ type MessageWaitRequest struct {
 // it started waiting. Handles and thread members are mutable presentation; a
 // rename during the wait does not retarget it.
 type ResolvedWait struct {
+	Kind         string           `json:"kind,omitempty"`
 	AgentID      domain.AgentID   `json:"agent_id"`
 	FromID       domain.AgentID   `json:"from_id,omitempty"`
 	ThreadRootID domain.MessageID `json:"thread_root_id,omitempty"`
@@ -738,21 +745,21 @@ func (s *Service) Publish(ctx context.Context, req PublishRequest) (domain.Messa
 	if e := req.Validate(); e != nil {
 		return domain.Message{}, e
 	}
-	return s.prepareAnd(ctx, req.Mutation, req.Author, req.Topic, "", "", req.Title, req.Body, req.Expiry, req.Metadata, s.messageStore.Publish)
+	return s.prepareAnd(ctx, req.Mutation, req.Author, req.Topic, "", "", req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.Publish)
 }
 func (s *Service) DirectSend(ctx context.Context, req DirectSendRequest) (domain.Message, error) {
 	if e := req.Validate(); e != nil {
 		return domain.Message{}, e
 	}
-	return s.prepareAnd(ctx, req.Mutation, req.Author, "", "", req.Recipient, req.Title, req.Body, req.Expiry, req.Metadata, s.messageStore.DirectSend)
+	return s.prepareAnd(ctx, req.Mutation, req.Author, "", "", req.Recipient, req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.DirectSend)
 }
 func (s *Service) Reply(ctx context.Context, req ReplyRequest) (domain.Message, error) {
 	if e := req.Validate(); e != nil {
 		return domain.Message{}, e
 	}
-	return s.prepareAnd(ctx, req.Mutation, req.Author, "", req.Parent, "", req.Title, req.Body, req.Expiry, req.Metadata, s.messageStore.Reply)
+	return s.prepareAnd(ctx, req.Mutation, req.Author, "", req.Parent, "", req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.Reply)
 }
-func (s *Service) prepareAnd(ctx context.Context, m Mutation, author, topic, parent, recipient, title, body string, expiry Expiry, metadata json.RawMessage, fn func(context.Context, PreparedMessage) (domain.Message, error)) (domain.Message, error) {
+func (s *Service) prepareAnd(ctx context.Context, m Mutation, author, topic, parent, recipient, title, body, kind string, expiry Expiry, metadata json.RawMessage, fn func(context.Context, PreparedMessage) (domain.Message, error)) (domain.Message, error) {
 	now := s.clock.Now()
 	exp, e := expiry.resolve(now)
 	if e != nil {
@@ -768,11 +775,11 @@ func (s *Service) prepareAnd(ctx context.Context, m Mutation, author, topic, par
 	if topic == "" && parent == "" && recipient == "" {
 		return domain.Message{}, requiredErr("destination")
 	}
-	probe := domain.Message{ID: id, TopicID: domain.TopicID("top_aaaaaaaaaaaaaaaaaaaaaaaaaa"), AuthorID: domain.AgentID("agt_aaaaaaaaaaaaaaaaaaaaaaaaaa"), ThreadRootID: id, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata}
+	probe := domain.Message{ID: id, TopicID: domain.TopicID("top_aaaaaaaaaaaaaaaaaaaaaaaaaa"), AuthorID: domain.AgentID("agt_aaaaaaaaaaaaaaaaaaaaaaaaaa"), ThreadRootID: id, Kind: kind, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata}
 	if e = probe.Validate(parent != ""); e != nil {
 		return domain.Message{}, e
 	}
-	message, e := fn(ctx, PreparedMessage{Mutation: m, ID: id, Author: author, Topic: topic, Parent: parent, Recipient: recipient, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata, Now: now})
+	message, e := fn(ctx, PreparedMessage{Mutation: m, ID: id, Author: author, Topic: topic, Parent: parent, Recipient: recipient, Kind: kind, Title: title, Body: body, ExpiresAt: exp, Metadata: metadata, Now: now})
 	if e == nil {
 		s.messageEvents.Notify()
 	}
@@ -853,6 +860,9 @@ func (s *Service) TopicMessages(ctx context.Context, req MessageListRequest) (Pa
 	return page, err
 }
 func (s *Service) listMessages(ctx context.Context, req MessageListRequest, fn func(context.Context, MessageListRequest, time.Time) (Page[domain.Message], error)) (Page[domain.Message], error) {
+	if err := domain.ValidateMessageKinds(req.Kind); err != nil {
+		return Page[domain.Message]{}, err
+	}
 	p, e := req.normalized()
 	if e != nil {
 		return Page[domain.Message]{}, e
@@ -919,7 +929,7 @@ func (s *Service) WaitForAgent(ctx context.Context, req AgentWaitRequest) (domai
 }
 
 // WaitForMessages blocks until at least one unread message routed to the
-// selected agent matches the optional author and thread filters, and returns
+// selected agent matches the optional author, thread, and kind filters, and returns
 // that bounded batch with a continuation cursor.
 //
 // Matching is filtered in the store before the limit, so a batch is never
@@ -930,6 +940,9 @@ func (s *Service) WaitForAgent(ctx context.Context, req AgentWaitRequest) (domai
 // Self-authored messages do not satisfy a wait unless IncludeSelf is set,
 // matching the inbox default.
 func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (MessageWaitResponse, error) {
+	if err := domain.ValidateMessageKinds(req.Kind); err != nil {
+		return MessageWaitResponse{}, err
+	}
 	if strings.TrimSpace(req.Agent) == "" {
 		return MessageWaitResponse{}, requiredErr("agent")
 	}

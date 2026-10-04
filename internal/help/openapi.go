@@ -328,6 +328,13 @@ func schemaFromType(t reflect.Type, active map[reflect.Type]bool) map[string]any
 
 func openAPISchema(parameter Parameter) map[string]any {
 	schema := map[string]any{"type": parameter.Type}
+	if parameter.Name == "title" && parameter.Location == BodyParameter && !parameter.Required {
+		schema["type"] = []string{"string", "null"}
+	}
+	if parameter.Name == "kind" && parameter.Location == BodyParameter {
+		schema["maxLength"] = 64
+		schema["pattern"] = "^([a-z0-9][a-z0-9_.-]{0,63})?$"
+	}
 	if parameter.Description != "" {
 		schema["description"] = parameter.Description
 	}

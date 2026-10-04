@@ -224,6 +224,7 @@ type Message struct {
 	Sequence      int64           `json:"sequence"`
 	AuthorID      AgentID         `json:"author_id"`
 	AuthorContext AuthorContext   `json:"author_context"`
+	Kind          string          `json:"kind,omitempty"`
 	Title         string          `json:"title,omitempty"`
 	Body          string          `json:"body"`
 	InReplyTo     *MessageID      `json:"in_reply_to,omitempty"`
@@ -238,6 +239,9 @@ type Message struct {
 }
 
 func (m Message) Validate(reply bool) error {
+	if err := ValidateMessageKind(m.Kind); err != nil {
+		return err
+	}
 	if _, err := ParseMessageID(string(m.ID)); err != nil {
 		return err
 	}
@@ -311,3 +315,39 @@ func TruncateUTF8Bytes(value string, max int) string {
 }
 
 func DefaultExpiry(created time.Time) *time.Time { v := created.UTC().Add(DefaultRetention); return &v }
+
+// ValidateMessageKind accepts optional labels without restricting their vocabulary.
+func ValidateMessageKind(kind string) error {
+	if kind == "" {
+		return nil
+	}
+	if len(kind) > 64 {
+		return fmt.Errorf("%w: kind exceeds 64 bytes", ErrInvalid)
+	}
+	for i, c := range kind {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (i > 0 && (c == '-' || c == '_' || c == '.')) {
+			continue
+		}
+		return fmt.Errorf("%w: kind must start with a lowercase letter or digit and contain only lowercase letters, digits, '-', '_', or '.'", ErrInvalid)
+	}
+	return nil
+}
+
+// ValidateMessageKinds validates a comma-separated filter; empty means all kinds.
+func ValidateMessageKinds(kinds string) error {
+	if kinds == "" {
+		return nil
+	}
+	if len(kinds) > 1024 {
+		return fmt.Errorf("%w: kind filter exceeds 1024 bytes", ErrInvalid)
+	}
+	for _, kind := range strings.Split(kinds, ",") {
+		if kind == "" {
+			return fmt.Errorf("%w: kind filter contains an empty label", ErrInvalid)
+		}
+		if err := ValidateMessageKind(kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
