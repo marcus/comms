@@ -153,6 +153,12 @@ In `--json` mode, success writes `{"schema":"comms.cli.v1","data":...}` to stdou
 - `comms search QUERY`: Full-text search across messages.
 - `comms observe`: Monitor all live traffic as an operator.
 
+For publish, send and reply, the stdin marker `-` may appear before or after flags. `--body-file -` also reads stdin. Choose exactly one body source; `--body "-"` sends a literal dash.
+
+```sh
+printf 'Looks good\n' | comms reply MESSAGE_ID - --metadata-json '{"reviewed":true}'
+```
+
 ### Message kinds for coordination
 
 Use `--kind status` for progress, `ready` for review requests, `blocked` for obstacles,

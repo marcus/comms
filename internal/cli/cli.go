@@ -739,10 +739,6 @@ func (r *runner) reply(args []string) error {
 
 func (r *runner) messageContent(name string, args []string, titleRequired bool) (map[string]any, error) {
 	stdinSelected := false
-	if len(args) > 0 && args[len(args)-1] == "-" {
-		stdinSelected = true
-		args = args[:len(args)-1]
-	}
 	fs := newFlagSet(name)
 	kind := fs.String("kind", "", "")
 	title := fs.String("title", "", "")
@@ -752,11 +748,24 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 	expiresIn := fs.String("expires-in", "", "")
 	never := fs.Bool("never-expires", false, "")
 	metadata := fs.String("metadata-json", "", "")
-	if err := fs.Parse(args); err != nil {
-		return nil, usage(err.Error())
-	}
-	if fs.NArg() != 0 {
-		return nil, usage("unexpected " + name + " arguments")
+	// Parse until a positional stdin marker, then resume flag parsing. Flag
+	// values such as --body "-" remain values rather than stdin markers.
+	for len(args) > 0 {
+		if err := fs.Parse(args); err != nil {
+			return nil, usage(err.Error())
+		}
+		args = fs.Args()
+		if len(args) == 0 {
+			break
+		}
+		if args[0] != "-" {
+			return nil, usage("unexpected " + name + " argument " + strconv.Quote(args[0]))
+		}
+		if stdinSelected {
+			return nil, usage("choose exactly one body source; duplicate stdin marker -")
+		}
+		stdinSelected = true
+		args = args[1:]
 	}
 	if titleRequired && *title == "" {
 		return nil, usage(name + " requires --title")
@@ -776,11 +785,11 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 	}
 	text := *body
 	var err error
-	if *bodyFile != "" {
+	if *bodyFile != "" && *bodyFile != "-" {
 		data, e := os.ReadFile(*bodyFile)
 		err = e
 		text = string(data)
-	} else if stdinSelected {
+	} else if stdinSelected || *bodyFile == "-" {
 		data, e := io.ReadAll(io.LimitReader(r.env.Stdin, domain.MaxBody+1))
 		err = e
 		text = string(data)
