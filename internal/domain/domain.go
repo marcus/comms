@@ -227,19 +227,22 @@ func (c AuthorContext) Validate() error {
 }
 
 type Message struct {
-	ID            MessageID       `json:"id"`
-	TopicID       TopicID         `json:"topic_id"`
-	Sequence      int64           `json:"sequence"`
-	AuthorID      AgentID         `json:"author_id"`
-	AuthorContext AuthorContext   `json:"author_context"`
-	Kind          string          `json:"kind,omitempty"`
-	Title         string          `json:"title,omitempty"`
-	Body          string          `json:"body"`
-	InReplyTo     *MessageID      `json:"in_reply_to,omitempty"`
-	ThreadRootID  MessageID       `json:"thread_root_id"`
-	CreatedAt     time.Time       `json:"created_at"`
-	ExpiresAt     *time.Time      `json:"expires_at,omitempty"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	// AuthorHandle and AuthorDisplayName are current read-time presentation.
+	AuthorHandle      string          `json:"author_handle"`
+	AuthorDisplayName string          `json:"author_display_name,omitempty"`
+	ID                MessageID       `json:"id"`
+	TopicID           TopicID         `json:"topic_id"`
+	Sequence          int64           `json:"sequence"`
+	AuthorID          AgentID         `json:"author_id"`
+	AuthorContext     AuthorContext   `json:"author_context"`
+	Kind              string          `json:"kind,omitempty"`
+	Title             string          `json:"title,omitempty"`
+	Body              string          `json:"body"`
+	InReplyTo         *MessageID      `json:"in_reply_to,omitempty"`
+	ThreadRootID      MessageID       `json:"thread_root_id"`
+	CreatedAt         time.Time       `json:"created_at"`
+	ExpiresAt         *time.Time      `json:"expires_at,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
 	// BodyTruncated marks a projection whose Body is a preview rather than the
 	// stored body. It is set by lean listings, never persisted, and absent
 	// whenever the full body was returned.

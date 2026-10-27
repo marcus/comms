@@ -1215,6 +1215,9 @@ func renderMessage(w io.Writer, v map[string]any, compact bool) error {
 	}
 	if authorID != "" {
 		authorStr := "author:" + authorID
+		if handle, _ := v["author_handle"].(string); handle != "" {
+			authorStr = "author:@" + handle + " (" + authorID + ")"
+		}
 		if authorCtx, ok := v["author_context"].(map[string]any); ok {
 			harness, _ := authorCtx["harness"].(string)
 			project, _ := authorCtx["project"].(string)

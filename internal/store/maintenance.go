@@ -147,7 +147,7 @@ func (a *Adapter) Snapshot(ctx context.Context) (app.Snapshot, error) {
 		out.Subscriptions = append(out.Subscriptions, v)
 	}
 	_ = rows.Close()
-	rows, e = a.read.QueryContext(ctx, "SELECT "+messageCols+" FROM messages ORDER BY topic_id,sequence,id")
+	rows, e = a.read.QueryContext(ctx, "SELECT "+prefixedMessageCols("messages")+" FROM messages ORDER BY topic_id,sequence,id")
 	if e != nil {
 		return out, e
 	}

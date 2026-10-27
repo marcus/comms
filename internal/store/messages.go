@@ -22,7 +22,7 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var parent, metadata sql.NullString
 	var created int64
 	var expires sql.NullInt64
-	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind)
+	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName)
 	if e != nil {
 		return m, e
 	}
@@ -43,7 +43,7 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 func resolveMessage(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, ref string) (domain.Message, error) {
-	m, e := scanMessage(q.QueryRowContext(ctx, "SELECT "+messageCols+" FROM messages WHERE id=?", ref))
+	m, e := scanMessage(q.QueryRowContext(ctx, "SELECT "+prefixedMessageCols("messages")+" FROM messages WHERE id=?", ref))
 	if errors.Is(e, sql.ErrNoRows) {
 		return m, fmt.Errorf("%w: message %q", app.ErrNotFound, ref)
 	}
@@ -175,7 +175,7 @@ func insertMessage(ctx context.Context, tx *sql.Tx, p app.PreparedMessage, autho
 	if e != nil {
 		return domain.Message{}, e
 	}
-	m := domain.Message{ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Kind: p.Kind, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
+	m := domain.Message{AuthorHandle: author.Handle, AuthorDisplayName: author.DisplayName, ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Kind: p.Kind, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
 	var parentID any
 	if parent != nil {
 		v := parent.ID
@@ -382,14 +382,14 @@ func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest,
 		if e != nil {
 			return app.Page[domain.Message]{}, e
 		}
-		query := "SELECT " + messageCols + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
+		query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
 		return pageMessagesLatestSequence(ctx, a.read, query, []any{t.ID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
 	}
 	seq, id, e := ascendingCursor(req.Cursor)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
 	}
-	query := "SELECT " + messageCols + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
+	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
 	return pageMessages(ctx, a.read, query, []any{t.ID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
 }
 func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Time) (app.Page[domain.Message], error) {
@@ -402,14 +402,14 @@ func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Ti
 		if e != nil {
 			return app.Page[domain.Message]{}, e
 		}
-		query := "SELECT " + messageCols + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
+		query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
 		return pageMessagesLatestSequence(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
 	}
 	seq, id, e := ascendingCursor(req.Cursor)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
 	}
-	query := "SELECT " + messageCols + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
+	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
 	return pageMessages(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
 }
 func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (domain.Message, error) {
@@ -651,7 +651,7 @@ func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.
 		}
 		topicID = string(t.ID)
 	}
-	query := "SELECT " + messageCols + " FROM messages WHERE (expires_at IS NULL OR expires_at>?) AND (?='' OR topic_id=?) AND (?=0 OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?"
+	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE (expires_at IS NULL OR expires_at>?) AND (?='' OR topic_id=?) AND (?=0 OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?"
 	return pageMessages(ctx, a.read, query, []any{micros(now), topicID, topicID, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
 }
 
@@ -660,7 +660,7 @@ func prefixedMessageCols(alias string) string {
 	for i := range parts {
 		parts[i] = alias + "." + parts[i]
 	}
-	return strings.Join(parts, ",")
+	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id)"
 }
 func prefixedAgentCols(alias string) string {
 	parts := strings.Split(agentCols, ",")
