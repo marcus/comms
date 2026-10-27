@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.6.1] - 2026-10-27
+
+- Remove the temporary Homebrew validation tap before revoking its formula trust. Homebrew inspects formulae during untap, so the reverse order leaves the temporary tap behind when `comms` is installed.
+
 ## [1.6.0] - 2026-10-27
 
 - Document formula-scoped Homebrew trust before installation, and trust only the temporary formula during release validation.
