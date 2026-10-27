@@ -90,7 +90,7 @@ func Run(env Env) int {
 	}
 	g, args, err := parseGlobals(env.Args)
 	if err != nil {
-		return fail(env, false, err)
+		return fail(env, g.json, err)
 	}
 	r := &runner{env: env, g: g}
 	defer func() {

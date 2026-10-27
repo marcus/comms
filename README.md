@@ -117,6 +117,8 @@ All commands return human-readable text by default, or structured JSON with `--j
 
 `comms --version` (also `comms version`, `-v`, or `-V`) reports the client version without starting the service.
 
+In `--json` mode, success writes `{"schema":"comms.cli.v1","data":...}` to stdout and exits 0. Failure writes exactly one `{"error":{"code":"...","message":"...","details":{}}}` object to stderr and exits nonzero; stdout is empty. Read stdout on exit 0 and stderr otherwise. This preserves the existing stream contract. Use `error.code` to distinguish `timeout`, `canceled`, and `unavailable` (all exit 5); never interpret empty stdout as a timeout. Other exits are 1 internal, 2 invalid argument, 3 not found, and 4 conflict. Human-readable messages may change.
+
 ### Identity & Sessions
 - `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH] [--replace]`: Register or reconnect a session context. Without `--context` or `COMMS_CONTEXT`, the identity is stored per terminal session: per `COMMS_SESSION` value when set, else per `CODEX_THREAD_ID` conversation, else per tmux pane, else in one machine-wide file. Join refuses to switch that implicit identity to a different active agent unless you pass `--replace`, so concurrent agents cannot silently take over each other's identity.
   Repeating `join HANDLE` with the same active context reconnects that agent and returns `rejoined: true`. A handle alone cannot reconnect from a fresh context: reuse the original context or the same external namespace/key; use `--as HANDLE` for commands on an existing identity. `--replace` permits switching a context, but does not claim an existing handle.

@@ -85,6 +85,7 @@ func CLIUsage(program string) string {
 		}
 		fmt.Fprintf(&output, "  %-92s %s\n", program+" "+operation.CLI, operation.Summary)
 	}
+	fmt.Fprintln(&output, "In --json mode, successful data is written to stdout as {\"schema\":\"comms.cli.v1\",\"data\":...}; failures write exactly one {\"error\":{\"code\":\"...\",\"message\":\"...\",\"details\":{}}} object to stderr and exit nonzero. Parse stdout on exit 0 and stderr otherwise; never treat empty stdout as a timeout. Stable exits: 1 internal, 2 invalid_argument, 3 not_found, 4 conflict, 5 unavailable/timeout/canceled. Branch on error.code, not message text.")
 	fmt.Fprintln(&output, "\nEvery response supports --json. Ordinary commands start the local service if needed. status, health, hello, doctor, and stop do not. Use `comms serve` for a foreground process or `brew services start comms` for login startup.")
 	return output.String()
 }
@@ -124,6 +125,7 @@ func AgentInstructions() Instructions {
 			"Inbox bodies are previews by default: triage from them, peek or thread what you will act on, and still read-through to acknowledge, because retrieval is recorded but is not an acknowledgment.",
 			"Stable record IDs do not change when friendly handles or topic names change.",
 			"Structured responses, error codes, and cursor meanings follow versioned compatibility contracts.",
+			"In --json mode, successful data is written to stdout as {\"schema\":\"comms.cli.v1\",\"data\":...}; failures write exactly one {\"error\":{\"code\":\"...\",\"message\":\"...\",\"details\":{}}} object to stderr and exit nonzero. Parse stdout on exit 0 and stderr otherwise; never treat empty stdout as a timeout. Stable exits: 1 internal, 2 invalid_argument, 3 not_found, 4 conflict, 5 unavailable/timeout/canceled. Branch on error.code, not message text.",
 		},
 		Boundaries: []string{
 			"Comms carries transient coordination; durable tasks, decisions, artifacts, and secrets belong in their owning systems.",
