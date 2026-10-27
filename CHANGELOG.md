@@ -2,6 +2,8 @@
 
 ## [1.7.0] - 2026-10-27
 
+- Release private HTTP transports when an in-process CLI invocation returns, including readiness and status probes. This prevents idle sockets from outliving repeated invocations; shutdown deadlines remain unchanged.
+
 - Add `observe --head` and `GET /v1/observe?head=true` to capture a current committed starting cursor without downloading history. The response retains `items` and `after`; a head is an empty batch. Capture it once, persist the cursor before waiting, and reuse the saved cursor after restarts to include downtime traffic. Taking a new head explicitly skips prior traffic.
 - Keep head snapshots read-only, global and compatible with existing forward cursors, including empty stores, older stores without ordinal metadata and purged history. Reject combining head with wait, after or backward cursor.
 - Publish a complete environment reference in the README, general help, serve help and text/JSON/API instructions, with defaults and precedence for state, socket and identity selection. The actual variable is `COMMS_SOCKET`; `COMMS_SOCKETS` is not read. Include build/release inputs and a tested isolated-service recipe that overrides inherited selectors.
