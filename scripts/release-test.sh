@@ -99,6 +99,9 @@ for mock_trust_status in 0 1; do
       style_line=$(grep -n '^style --formula ' "$mock_brew_log" | cut -d: -f1)
       [[ -n $trust_line && $trust_line -lt $style_line ]] || fail "formula loaded before trust"
       grep -q '^untrust --formula ' "$mock_brew_log" || fail "temporary formula trust leaked"
+      untap_line=$(grep -n '^untap --force ' "$mock_brew_log" | cut -d: -f1)
+      untrust_line=$(grep -n '^untrust --formula ' "$mock_brew_log" | cut -d: -f1)
+      [[ -n $untap_line && $untap_line -lt $untrust_line ]] || fail "temporary tap was untrusted before untapping"
     elif grep -q '^trust ' "$mock_brew_log"; then
       fail "old Homebrew was asked to trust a formula"
     fi

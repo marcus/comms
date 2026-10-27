@@ -198,7 +198,9 @@ validate_formula() {
   [[ $(formula_sha256 "$formula") == "$expected_sha" ]] || die "formula checksum mismatch"
 
   (
-    trap 'if $needs_trust; then brew untrust --formula "$validation_tap/comms" >/dev/null 2>&1 || true; fi; brew untap --force "$validation_tap" >/dev/null 2>&1 || true' EXIT
+    # Untap while the formula is still trusted: Homebrew inspects installed
+    # formula names during untap, even when this temporary formula has no keg.
+    trap 'brew untap --force "$validation_tap" >/dev/null 2>&1 || true; if $needs_trust; then brew untrust --formula "$validation_tap/comms" >/dev/null 2>&1 || true; fi' EXIT
     brew tap-new --no-git "$validation_tap" >/dev/null
     validation_repo=$(brew --repository "$validation_tap")
     mkdir -p "$validation_repo/Formula"
