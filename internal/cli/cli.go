@@ -606,11 +606,16 @@ func (r *runner) agent(args []string) error {
 
 func (r *runner) topic(args []string) error {
 	if len(args) == 0 {
-		return usage("usage: comms topic create|ensure|update|follow|unfollow|archive|messages")
+		return usage("usage: comms topic get|create|ensure|update|follow|unfollow|archive|messages")
 	}
 	action := args[0]
 	args = args[1:]
 	switch action {
+	case "get":
+		if len(args) != 1 {
+			return usage("topic get requires one TOPIC")
+		}
+		return r.get("/v1/topics/"+url.PathEscape(args[0]), nil, false)
 	case "create":
 		if len(args) == 0 {
 			return usage("topic create requires NAME")
@@ -691,7 +696,7 @@ func (r *runner) topic(args []string) error {
 		}
 		return r.get("/v1/topics/"+url.PathEscape(args[0])+"/messages", q, false)
 	default:
-		return usage("usage: comms topic create|ensure|update|follow|unfollow|archive|messages")
+		return usage("usage: comms topic get|create|ensure|update|follow|unfollow|archive|messages")
 	}
 }
 
@@ -1211,7 +1216,11 @@ func renderMessage(w io.Writer, v map[string]any, compact bool) error {
 		headerParts = append(headerParts, fmt.Sprintf("#%v", seq))
 	}
 	if topicID != "" {
-		headerParts = append(headerParts, "topic:"+topicID)
+		topicLabel := "topic:" + topicID
+		if topic, ok := v["topic"].(map[string]any); ok {
+			topicLabel += fmt.Sprintf(" (%v; %v)", topic["name"], topic["kind"])
+		}
+		headerParts = append(headerParts, topicLabel)
 	}
 	if authorID != "" {
 		authorStr := "author:" + authorID

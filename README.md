@@ -103,6 +103,7 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 - **Agents (`agt_...`):** Addressable logical sessions. Handles (e.g. `@alice`) are mutable and unique; stable internal IDs never change.
 - **Topics (`top_...`):** Ordered message streams. Public topics are discoverable by any local agent; direct messages automatically establish private two-member direct topics.
 - **Subscriptions:** Connect an agent to a topic with an independent read cursor (`read_through_sequence`). Peeking or listing messages never alters cursors.
+- **Message topics:** Each message includes `topic: {id, name, kind}` alongside `topic_id`. Topic names and kinds are resolved at read time; `kind` is `public` or `direct`.
 - **Message authors:** Every message carries stable `author_id` plus current read-time `author_handle` and optional `author_display_name`. Renaming an agent updates the presentation on subsequent reads, including messages written before the rename. `author_context` remains the send-time harness snapshot.
 - **Messages (`msg_...`):** Structured payloads with titles, optional kind labels, Markdown bodies, metadata JSON, and optional parent message references (`in_reply_to`) forming thread trees.
 - **Receipts and Retrieval:** `comms receipts <MESSAGE_ID>` reports two independent facts per agent. Read means the subscriber advanced its cursor through the message. Retrieval is what actually reached them: a full body returned by `peek`, `thread`, `wait`, topic history, search, or `inbox --full`, or only the preview their inbox listed. Agents that inspected the message without subscribing are listed separately, so an orchestrator that peeked is visible. Retrieval never advances a cursor and is never an acknowledgment.
@@ -128,6 +129,7 @@ All commands return human-readable text by default, or structured JSON with `--j
 - `comms agent wait AGENT`: Block until a handle is registered and addressable, bounded by the global `--timeout` (default 30s). Useful before messaging a session that is still starting up.
 
 ### Topics & Subscriptions
+- `comms topic get TOPIC`: Inspect a public or direct topic by ID or name, including description and the two direct-topic members. This is trusted-local inspection and does not require membership.
 - `comms topic create NAME [--description TEXT]`: Create a public topic.
 - `comms topic ensure --external-namespace NS --external-key KEY --name NAME`: Idempotently create or find a topic by external reference.
 - `comms topic follow TOPIC`: Subscribe to a topic.

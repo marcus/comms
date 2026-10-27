@@ -215,6 +215,8 @@ func responseType(id string) reflect.Type {
 		value = app.Page[domain.Agent]{}
 	case "topic.create", "topic.update", "topic.archive":
 		value = domain.Topic{}
+	case "topic.get":
+		value = app.TopicDetails{}
 	case "topic.ensure":
 		value = app.EnsureTopicResponse{}
 	case "topic.list":

@@ -119,6 +119,7 @@ var registry = []Operation{
 		waitTimeoutParameter(),
 	}},
 
+	{ID: "topic.get", Category: "Topics and subscriptions", Summary: "Inspect a topic", Description: "Returns a public or direct topic by stable ID or current name, including description and the two direct-topic members. Trusted-local inspection does not require membership or change subscriptions.", CLI: "topic get TOPIC", HTTP: route("GET", "/v1/topics/{topic}"), MCPName: "comms_get_topic", Parameters: []Parameter{p("topic", "Stable topic ID or current name.", "string", PathParameter, true)}},
 	{ID: "topic.create", Category: "Topics and subscriptions", Summary: "Create a public topic", Description: "Creates a named, discoverable public topic.", CLI: "topic create NAME [--description TEXT]", HTTP: route("POST", "/v1/topics"), MCPName: "comms_create_topic", Mutating: true, Parameters: []Parameter{
 		p("name", "Friendly, case-insensitively unique topic name.", "string", BodyParameter, true),
 		p("description", "Optional topic description.", "string", BodyParameter, false),

@@ -22,7 +22,7 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var parent, metadata sql.NullString
 	var created int64
 	var expires sql.NullInt64
-	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName)
+	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName, &m.Topic.Name, &m.Topic.Kind)
 	if e != nil {
 		return m, e
 	}
@@ -36,6 +36,7 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	if metadata.Valid {
 		m.Metadata = json.RawMessage(metadata.String)
 	}
+	m.Topic.ID = m.TopicID
 	m.CreatedAt = timeFrom(created)
 	m.ExpiresAt = nullableTime(expires)
 	return m, nil
@@ -175,7 +176,7 @@ func insertMessage(ctx context.Context, tx *sql.Tx, p app.PreparedMessage, autho
 	if e != nil {
 		return domain.Message{}, e
 	}
-	m := domain.Message{AuthorHandle: author.Handle, AuthorDisplayName: author.DisplayName, ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Kind: p.Kind, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
+	m := domain.Message{Topic: domain.MessageTopic{ID: topic.ID, Name: topic.Name, Kind: topic.Kind}, AuthorHandle: author.Handle, AuthorDisplayName: author.DisplayName, ID: p.ID, TopicID: topic.ID, Sequence: sequence, AuthorID: author.ID, AuthorContext: domain.AuthorContext{Harness: author.Harness, Project: author.Project, SessionRef: author.SessionRef}, Kind: p.Kind, Title: p.Title, Body: p.Body, ThreadRootID: p.ID, CreatedAt: p.Now, ExpiresAt: p.ExpiresAt, Metadata: p.Metadata}
 	var parentID any
 	if parent != nil {
 		v := parent.ID
@@ -660,7 +661,7 @@ func prefixedMessageCols(alias string) string {
 	for i := range parts {
 		parts[i] = alias + "." + parts[i]
 	}
-	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id)"
+	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT name FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT kind FROM topics WHERE topics.id=" + alias + ".topic_id)"
 }
 func prefixedAgentCols(alias string) string {
 	parts := strings.Split(agentCols, ",")

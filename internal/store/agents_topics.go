@@ -442,3 +442,28 @@ func (a *Adapter) ListSubscriptions(ctx context.Context, req app.SubscriptionLis
 	}
 	return out, nil
 }
+
+// GetTopic is trusted-local inspection, including direct topics and their two members.
+func (a *Adapter) GetTopic(ctx context.Context, ref string) (app.TopicDetails, error) {
+	topic, err := resolveTopic(ctx, a.read, ref)
+	if err != nil {
+		return app.TopicDetails{}, err
+	}
+	out := app.TopicDetails{Topic: topic}
+	if topic.Kind != domain.TopicDirect {
+		return out, nil
+	}
+	rows, err := a.read.QueryContext(ctx, "SELECT "+prefixedAgentCols("a")+" FROM agents a JOIN subscriptions s ON s.agent_id=a.id WHERE s.topic_id=? ORDER BY a.id", topic.ID)
+	if err != nil {
+		return out, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return out, err
+		}
+		out.Members = append(out.Members, agent)
+	}
+	return out, rows.Err()
+}

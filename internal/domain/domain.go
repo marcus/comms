@@ -226,7 +226,14 @@ func (c AuthorContext) Validate() error {
 	return nil
 }
 
+type MessageTopic struct {
+	ID   TopicID   `json:"id"`
+	Name string    `json:"name"`
+	Kind TopicKind `json:"kind"`
+}
+
 type Message struct {
+	Topic MessageTopic `json:"topic"`
 	// AuthorHandle and AuthorDisplayName are current read-time presentation.
 	AuthorHandle      string          `json:"author_handle"`
 	AuthorDisplayName string          `json:"author_display_name,omitempty"`

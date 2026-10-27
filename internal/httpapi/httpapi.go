@@ -105,6 +105,7 @@ func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
 	mux.HandleFunc("GET /v1/agents/{agent}/wait", h.waitAgent)
 	mux.HandleFunc("POST /v1/topics", h.createTopic)
 	mux.HandleFunc("PUT /v1/topics/by-external-reference", h.ensureTopic)
+	mux.HandleFunc("GET /v1/topics/{topic}", h.getTopic)
 	mux.HandleFunc("PATCH /v1/topics/{topic}", h.updateTopic)
 	mux.HandleFunc("POST /v1/topics/{topic}/archive", h.archiveTopic)
 	mux.HandleFunc("GET /v1/topics", h.topics)
@@ -351,6 +352,11 @@ func (h *Handler) agents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, e := h.app.Agents(r.Context(), app.AgentListRequest{PageRequest: p, IncludeRetired: boolQuery(r, "include_retired"), Search: r.URL.Query().Get("search"), Project: r.URL.Query().Get("project")})
+	h.respond(w, v, e)
+}
+
+func (h *Handler) getTopic(w http.ResponseWriter, r *http.Request) {
+	v, e := h.app.Topic(r.Context(), r.PathValue("topic"))
 	h.respond(w, v, e)
 }
 

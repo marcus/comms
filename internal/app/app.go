@@ -486,7 +486,13 @@ type AgentStore interface {
 	RetireAgent(context.Context, RetireAgentRequest, time.Time) (domain.Agent, error)
 	ListAgents(context.Context, AgentListRequest, time.Time) (Page[domain.Agent], error)
 }
+type TopicDetails struct {
+	domain.Topic
+	Members []domain.Agent `json:"members,omitempty"`
+}
+
 type TopicStore interface {
+	GetTopic(context.Context, string) (TopicDetails, error)
 	CreateTopic(context.Context, CreateTopicRequest, domain.Topic, time.Time) (domain.Topic, error)
 	EnsureTopic(context.Context, EnsureTopicRequest, domain.Topic, time.Time) (EnsureTopicResponse, error)
 	UpdateTopic(context.Context, UpdateTopicRequest, time.Time) (domain.Topic, error)
@@ -709,6 +715,13 @@ func (s *Service) ArchiveTopic(ctx context.Context, req ArchiveTopicRequest) (do
 	}
 	return s.topics.ArchiveTopic(ctx, req, s.clock.Now())
 }
+func (s *Service) Topic(ctx context.Context, ref string) (TopicDetails, error) {
+	if strings.TrimSpace(ref) == "" {
+		return TopicDetails{}, requiredErr("topic")
+	}
+	return s.topics.GetTopic(ctx, ref)
+}
+
 func (s *Service) Topics(ctx context.Context, agent string, req TopicListRequest) (Page[domain.Topic], error) {
 	p, e := req.normalized()
 	if e != nil {
