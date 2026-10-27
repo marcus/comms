@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0] - 2026-10-27
+
+- Document formula-scoped Homebrew trust before installation, and trust only the temporary formula during release validation.
+- Accept `--version`, `-v` and `-V` as offline aliases for `version`; the Homebrew formula test exercises `--version`.
+- Include current `author_handle` and optional `author_display_name` alongside stable `author_id` on message reads. Send-time `author_context` remains unchanged.
+- Include read-time message `topic: {id, name, kind}` alongside `topic_id`. Add `topic get TOPIC` and `GET /v1/topics/{topic}`, including both direct-topic members.
+- Document and test the existing JSON stream contract: successful data on stdout, one structured error on stderr, and a nonzero exit status. Global argument errors honor `--json` regardless of flag order.
+- Accept message flags after the stdin marker `-` and support `--body-file -`; literal `--body "-"` and exclusive body-source validation remain supported.
+- Add `observe --wait [--after CURSOR] [--topic TOPIC]` and HTTP parity for one bounded operator stream across many agents. Forward batches use persistent commit-order cursors; ordinary history retains newest-first pagination.
+- Add message `recipient_ids` for current active subscribers excluding the author and retired agents. These describe read-time routing, not delivery history or unread status. Observation does not acknowledge messages or record retrieval.
+- Keep the existing database schema version. The store adapter persists an insertion high-water mark in existing metadata so forward observation survives clock ties/regression and message expiry/purge.
+
 ## [1.5.0] - 2026-10-04
 
 - Scope implicit Codex identities by `CODEX_THREAD_ID` before the tmux fallback,
