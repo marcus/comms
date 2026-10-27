@@ -965,9 +965,34 @@ func (r *runner) search(args []string) error {
 	return r.get("/v1/search", q, false)
 }
 func (r *runner) observe(args []string) error {
-	q, e := listQuery("observe", args, false)
-	if e != nil {
-		return e
+	fs := newFlagSet("observe")
+	wait := fs.Bool("wait", false, "")
+	after := fs.String("after", "", "")
+	topic := fs.String("topic", "", "")
+	limit := fs.Int("limit", 0, "")
+	cursor := fs.String("cursor", "", "")
+	fs.Bool("latest", false, "") // Retain the previously accepted flag.
+	if err := fs.Parse(args); err != nil {
+		return usage(err.Error())
+	}
+	if fs.NArg() != 0 {
+		return usage("unexpected observe arguments")
+	}
+	if *cursor != "" && (*wait || *after != "") {
+		return usage("--cursor cannot be combined with --wait or --after")
+	}
+	q := url.Values{}
+	setBool(q, "wait", *wait)
+	set(q, "after", *after)
+	set(q, "topic", *topic)
+	setInt(q, "limit", *limit)
+	set(q, "cursor", *cursor)
+	if *wait {
+		bound, err := r.waitBound()
+		if err != nil {
+			return err
+		}
+		q.Set("timeout", bound.String())
 	}
 	return r.get("/v1/observe", q, false)
 }
@@ -1302,6 +1327,12 @@ func renderMessage(w io.Writer, v map[string]any, compact bool) error {
 
 func parseGlobals(args []string) (globals, []string, error) {
 	g := globals{timeout: defaultCommandTimeout}
+	// Select the output contract even when an earlier global flag is invalid.
+	for _, arg := range args {
+		if arg == "--json" {
+			g.json = true
+		}
+	}
 	rest := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]

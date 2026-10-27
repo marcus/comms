@@ -719,7 +719,8 @@ func TestInboxExcludesSelfAuthoredMessagesByDefault(t *testing.T) {
 			return sys.service.Search(ctx, app.SearchRequest{Query: "alice-direct"})
 		},
 		"observe": func() (app.Page[domain.Message], error) {
-			return sys.service.Observe(ctx, app.ObserveRequest{})
+			result, err := sys.service.Observe(ctx, app.ObserveRequest{})
+			return result.Page, err
 		},
 	} {
 		page, e := list()

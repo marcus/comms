@@ -429,7 +429,14 @@ type SearchRequest struct {
 }
 type ObserveRequest struct {
 	PageRequest
-	Topic string `json:"topic,omitempty"`
+	Topic   string        `json:"topic,omitempty"`
+	Wait    bool          `json:"wait,omitempty"`
+	After   string        `json:"after,omitempty"`
+	Timeout time.Duration `json:"-"`
+}
+type ObserveResponse struct {
+	Page[domain.Message]
+	After string `json:"after,omitempty"`
 }
 
 type RetentionStatus struct {
@@ -515,7 +522,7 @@ type MessageStore interface {
 	Receipts(context.Context, string, time.Time) (ReceiptReport, error)
 	RecordRetrievals(context.Context, []RetrievalEvent) error
 	Search(context.Context, SearchRequest, time.Time) (Page[domain.Message], error)
-	Observe(context.Context, ObserveRequest, time.Time) (Page[domain.Message], error)
+	Observe(context.Context, ObserveRequest, time.Time) (ObserveResponse, error)
 	ResolveWait(context.Context, MessageWaitRequest, time.Time) (ResolvedWait, error)
 	MatchingMessages(context.Context, MessageWaitRequest, ResolvedWait, time.Time) (MessageWaitResponse, error)
 }
@@ -1097,13 +1104,53 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (Page[domain.Me
 	}
 	return page, err
 }
-func (s *Service) Observe(ctx context.Context, req ObserveRequest) (Page[domain.Message], error) {
-	p, e := req.normalized()
-	if e != nil {
-		return Page[domain.Message]{}, e
+
+// Observe shares one read-only operator stream across all agent identities.
+func (s *Service) Observe(ctx context.Context, req ObserveRequest) (ObserveResponse, error) {
+	p, err := req.normalized()
+	if err != nil {
+		return ObserveResponse{}, err
 	}
 	req.PageRequest = p
-	return s.messageStore.Observe(ctx, req, s.clock.Now())
+	if req.Cursor != "" && (req.Wait || req.After != "") {
+		return ObserveResponse{}, fmt.Errorf("%w: --cursor cannot be combined with --wait or --after", domain.ErrInvalid)
+	}
+	if !req.Wait {
+		return s.messageStore.Observe(ctx, req, s.clock.Now())
+	}
+	timeout, err := normalizeWaitTimeout(req.Timeout)
+	if err != nil {
+		return ObserveResponse{}, err
+	}
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	signals, release := s.messageEvents.Subscribe()
+	defer release()
+	if req.Topic != "" {
+		topic, err := s.topics.GetTopic(deadline, req.Topic)
+		if err != nil {
+			return ObserveResponse{}, err
+		}
+		req.Topic = string(topic.ID)
+	}
+
+	for {
+		result, err := s.messageStore.Observe(deadline, req, s.clock.Now())
+		if err != nil {
+			if deadline.Err() != nil {
+				return ObserveResponse{}, waitEnded(ctx, "no observed message arrived within "+timeout.String())
+			}
+			return ObserveResponse{}, err
+		}
+		if len(result.Items) > 0 {
+			return result, nil
+		}
+		select {
+		case <-signals:
+		case <-deadline.Done():
+			return ObserveResponse{}, waitEnded(ctx, "no observed message arrived within "+timeout.String())
+		}
+	}
 }
 func (s *Service) RetentionStatus(ctx context.Context) (RetentionStatus, error) {
 	return s.maintenance.RetentionStatus(ctx, s.clock.Now())

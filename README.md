@@ -151,7 +151,7 @@ In `--json` mode, success writes `{"schema":"comms.cli.v1","data":...}` to stdou
 - `comms receipts MESSAGE_ID [--detailed]`: Show, per agent, whether they acknowledged the message and how much of it reached them, plus non-subscribers that inspected it. `--detailed` adds absolute timestamps, visit counts, and harness context.
 - `comms thread MESSAGE_ID`: View all ancestors and replies in a thread tree.
 - `comms search QUERY`: Full-text search across messages.
-- `comms observe`: Monitor all live traffic as an operator.
+- `comms observe [--wait] [--after CURSOR] [--topic TOPIC]`: Inspect public and direct traffic as a trusted-local operator. Ordinary history stays newest-first with `next_cursor`. `--wait` or `--after` switches to forward commit order with an additive `data.after` continuation token; `--cursor` cannot be combined with either.
 
 For publish, send and reply, the stdin marker `-` may appear before or after flags. `--body-file -` also reads stdin. Choose exactly one body source; `--body "-"` sends a literal dash.
 
@@ -177,6 +177,12 @@ parameter). Filtering happens before pagination and combines with the other filt
 Waiting never acknowledges messages. Root titles remain required; reply titles are
 optional and accept null. JSON readers must tolerate an absent or null title. Kind is
 optional in message JSON and is omitted on legacy or unclassified messages.
+
+### One observer for many agents
+
+A bridge uses one `comms --json --timeout 2m observe --wait` request (HTTP `GET /v1/observe?wait=true&timeout=2m`) across all agents. No identity is required. Without `--after`, it returns existing live history first; pass the returned `data.after` as `--after` on each subsequent request. `--after` also supports nonblocking catch-up. Tokens are opaque and specific to this store and forward observation; do not substitute an agent wait or backward history cursor. Keep the last token on timeout and retry from it. Waits default to 30 seconds, allow up to one hour, and use the documented JSON stderr error contract on timeout/cancellation.
+
+Every message includes additive `recipient_ids`: current active subscriber IDs excluding the author and retired agents. A direct message normally names the other member. Routing is resolved at read time, so it reflects subscription changes rather than historical delivery or unread status. Bridges filter their managed IDs, deduplicate by message ID, and choose when to acknowledge. Observation neither advances read cursors nor records retrieval receipts. Forward order follows committed insertions, independent of wall-clock ties, and tokens remain valid after message expiry/purge. Expired or purged message bodies cannot be replayed.
 
 ### Service & Maintenance
 - `comms status`: Report whether the local service is running. Does not start it.

@@ -233,7 +233,9 @@ type MessageTopic struct {
 }
 
 type Message struct {
-	Topic MessageTopic `json:"topic"`
+	// RecipientIDs is a read-time routing projection, not delivery history.
+	RecipientIDs []AgentID    `json:"recipient_ids"`
+	Topic        MessageTopic `json:"topic"`
 	// AuthorHandle and AuthorDisplayName are current read-time presentation.
 	AuthorHandle      string          `json:"author_handle"`
 	AuthorDisplayName string          `json:"author_display_name,omitempty"`

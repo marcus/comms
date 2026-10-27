@@ -18,11 +18,11 @@ const messageCols = "id,topic_id,sequence,author_id,author_context_json,title,bo
 
 func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var m domain.Message
-	var authorJSON string
+	var authorJSON, recipientsJSON string
 	var parent, metadata sql.NullString
 	var created int64
 	var expires sql.NullInt64
-	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName, &m.Topic.Name, &m.Topic.Kind)
+	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName, &m.Topic.Name, &m.Topic.Kind, &recipientsJSON)
 	if e != nil {
 		return m, e
 	}
@@ -35,6 +35,9 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	}
 	if metadata.Valid {
 		m.Metadata = json.RawMessage(metadata.String)
+	}
+	if e = json.Unmarshal([]byte(recipientsJSON), &m.RecipientIDs); e != nil {
+		return m, e
 	}
 	m.Topic.ID = m.TopicID
 	m.CreatedAt = timeFrom(created)
@@ -187,13 +190,19 @@ func insertMessage(ctx context.Context, tx *sql.Tx, p app.PreparedMessage, autho
 	if e = m.Validate(parent != nil); e != nil {
 		return domain.Message{}, e
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT INTO messages("+messageCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", m.ID, m.TopicID, m.Sequence, m.AuthorID, string(ctxJSON), m.Title, m.Body, parentID, m.ThreadRootID, micros(m.CreatedAt), nullableMicros(m.ExpiresAt), rawJSON(m.Metadata), m.Kind); e != nil {
+	// Persist the insertion high-water mark independently of retained messages:
+	// expiry/purge must never cause a forward observer cursor to be reused.
+	var ordinal int64
+	if e = tx.QueryRowContext(ctx, "INSERT INTO store_meta(key,value) VALUES('message_ordinal',(SELECT COALESCE(MAX(rowid),0)+1 FROM messages)) ON CONFLICT(key) DO UPDATE SET value=MAX(CAST(value AS INTEGER),COALESCE((SELECT MAX(rowid) FROM messages),0))+1 RETURNING CAST(value AS INTEGER)").Scan(&ordinal); e != nil {
+		return domain.Message{}, e
+	}
+	if _, e = tx.ExecContext(ctx, "INSERT INTO messages(rowid,"+messageCols+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ordinal, m.ID, m.TopicID, m.Sequence, m.AuthorID, string(ctxJSON), m.Title, m.Body, parentID, m.ThreadRootID, micros(m.CreatedAt), nullableMicros(m.ExpiresAt), rawJSON(m.Metadata), m.Kind); e != nil {
 		return domain.Message{}, e
 	}
 	if _, e = tx.ExecContext(ctx, "INSERT INTO messages_fts(message_id,title,body) VALUES(?,?,?)", m.ID, m.Title, m.Body); e != nil {
 		return domain.Message{}, e
 	}
-	return m, nil
+	return resolveMessage(ctx, tx, string(m.ID))
 }
 
 func pageMessages(ctx context.Context, db *sql.DB, query string, args []any, limit int, descending bool) (app.Page[domain.Message], error) {
@@ -639,29 +648,69 @@ func literalFTSQuery(input string) string {
 	}
 	return strings.Join(terms, " ")
 }
-func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.Time) (app.Page[domain.Message], error) {
-	stamp, id, e := descendingCursor(req.Cursor)
-	if e != nil {
-		return app.Page[domain.Message]{}, e
-	}
+func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.Time) (app.ObserveResponse, error) {
+	var out app.ObserveResponse
 	var topicID string
 	if req.Topic != "" {
-		t, e := resolveTopic(ctx, a.read, req.Topic)
-		if e != nil {
-			return app.Page[domain.Message]{}, e
+		topic, err := resolveTopic(ctx, a.read, req.Topic)
+		if err != nil {
+			return out, err
 		}
-		topicID = string(t.ID)
+		topicID = string(topic.ID)
+	}
+	if req.Wait || req.After != "" {
+		var ordinal int64
+		if req.After != "" {
+			parts, err := decodeCursor(req.After, 2)
+			if err != nil {
+				return out, err
+			}
+			ordinal, err = strconv.ParseInt(parts[1], 10, 64)
+			if err != nil || parts[0] != "observe" || ordinal < 0 {
+				return out, fmt.Errorf("%w: invalid observation cursor", domain.ErrInvalid)
+			}
+		}
+		query := "SELECT " + prefixedMessageCols("m") + ",m.rowid FROM messages m WHERE m.rowid>? AND (m.expires_at IS NULL OR m.expires_at>?) AND (?='' OR m.topic_id=?) ORDER BY m.rowid LIMIT ?"
+		rows, err := a.read.QueryContext(ctx, query, ordinal, micros(now), topicID, topicID, req.Limit)
+		if err != nil {
+			return out, err
+		}
+		defer func() { _ = rows.Close() }()
+		out.Items = []domain.Message{}
+		out.After = encodeCursor("observe", strconv.FormatInt(ordinal, 10))
+		for rows.Next() {
+			scan := &observationRow{rows: rows}
+			msg, err := scanMessage(scan)
+			if err != nil {
+				return out, err
+			}
+			out.Items = append(out.Items, msg)
+			out.After = encodeCursor("observe", strconv.FormatInt(scan.ordinal, 10))
+		}
+		return out, rows.Err()
+	}
+	stamp, id, err := descendingCursor(req.Cursor)
+	if err != nil {
+		return out, err
 	}
 	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE (expires_at IS NULL OR expires_at>?) AND (?='' OR topic_id=?) AND (?=0 OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT ?"
-	return pageMessages(ctx, a.read, query, []any{micros(now), topicID, topicID, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
+	out.Page, err = pageMessages(ctx, a.read, query, []any{micros(now), topicID, topicID, stamp, stamp, stamp, id, req.Limit + 1}, req.Limit, true)
+	return out, err
 }
+
+type observationRow struct {
+	rows    *sql.Rows
+	ordinal int64
+}
+
+func (r *observationRow) Scan(dest ...any) error { return r.rows.Scan(append(dest, &r.ordinal)...) }
 
 func prefixedMessageCols(alias string) string {
 	parts := strings.Split(messageCols, ",")
 	for i := range parts {
 		parts[i] = alias + "." + parts[i]
 	}
-	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT name FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT kind FROM topics WHERE topics.id=" + alias + ".topic_id)"
+	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT name FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT kind FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT json_group_array(agent_id) FROM (SELECT s.agent_id FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=" + alias + ".topic_id AND s.unfollowed_at IS NULL AND a.retired_at IS NULL AND s.agent_id<>" + alias + ".author_id ORDER BY s.agent_id))"
 }
 func prefixedAgentCols(alias string) string {
 	parts := strings.Split(agentCols, ",")

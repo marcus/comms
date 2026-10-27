@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/marcus/comms/internal/app"
-	"github.com/marcus/comms/internal/help"
 	"strings"
 	"testing"
+
+	"github.com/marcus/comms/internal/app"
+	"github.com/marcus/comms/internal/help"
 )
 
 func TestJSONErrorStreamContract(t *testing.T) {
@@ -35,9 +36,11 @@ func TestJSONErrorStreamContract(t *testing.T) {
 			t.Fatalf("exit=%d out=%s err=%s", exit, &out, &stderr)
 		}
 	}
-	var out, stderr bytes.Buffer
-	if code := Run(Env{Args: []string{"--json", "--timeout", "nonsense", "wait"}, Stdout: &out, Stderr: &stderr}); code != 2 || !json.Valid(stderr.Bytes()) || out.Len() != 0 {
-		t.Fatalf("global parse: code=%d out=%s err=%s", code, &out, &stderr)
+	for _, args := range [][]string{{"--json", "--timeout", "nonsense", "wait"}, {"--timeout", "nonsense", "wait", "--json"}} {
+		var out, stderr bytes.Buffer
+		if code := Run(Env{Args: args, Stdout: &out, Stderr: &stderr}); code != 2 || !json.Valid(stderr.Bytes()) || out.Len() != 0 {
+			t.Fatalf("global parse: code=%d out=%s err=%s", code, &out, &stderr)
+		}
 	}
 	for _, doc := range []string{help.CLIUsage("comms"), help.InstructionsText()} {
 		if !strings.Contains(doc, "Parse stdout on exit 0 and stderr otherwise") {

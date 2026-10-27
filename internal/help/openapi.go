@@ -227,8 +227,10 @@ func responseType(id string) reflect.Type {
 		value = app.Page[domain.Subscription]{}
 	case "message.publish", "message.direct_send", "message.reply", "message.peek":
 		value = domain.Message{}
-	case "message.inbox", "message.topic", "message.thread", "message.search", "message.observe":
+	case "message.inbox", "message.topic", "message.thread", "message.search":
 		value = app.Page[domain.Message]{}
+	case "message.observe":
+		value = app.ObserveResponse{}
 	case "message.wait":
 		value = app.MessageWaitResponse{}
 	case "message.read_through":
