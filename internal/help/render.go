@@ -87,18 +87,20 @@ func CLIUsage(program string) string {
 	}
 	fmt.Fprintln(&output, "In --json mode, successful data is written to stdout as {\"schema\":\"comms.cli.v1\",\"data\":...}; failures write exactly one {\"error\":{\"code\":\"...\",\"message\":\"...\",\"details\":{}}} object to stderr and exit nonzero. Parse stdout on exit 0 and stderr otherwise; never treat empty stdout as a timeout. Stable exits: 1 internal, 2 invalid_argument, 3 not_found, 4 conflict, 5 unavailable/timeout/canceled. Branch on error.code, not message text.")
 	fmt.Fprintln(&output, "\nEvery response supports --json. Ordinary commands start the local service if needed. status, health, hello, doctor, and stop do not. Use `comms serve` for a foreground process or `brew services start comms` for login startup.")
+	fmt.Fprintln(&output, "\n"+EnvironmentReference)
 	return output.String()
 }
 
 // Instructions describes how agents can use Comms without prescribing a
 // harness lifecycle, polling cadence, or handoff workflow.
 type Instructions struct {
-	Schema     string   `json:"schema"`
-	Purpose    string   `json:"purpose"`
-	Guarantees []string `json:"guarantees"`
-	Boundaries []string `json:"boundaries"`
-	Examples   []string `json:"examples"`
-	Commands   []string `json:"commands"`
+	Environment string   `json:"environment"`
+	Schema      string   `json:"schema"`
+	Purpose     string   `json:"purpose"`
+	Guarantees  []string `json:"guarantees"`
+	Boundaries  []string `json:"boundaries"`
+	Examples    []string `json:"examples"`
+	Commands    []string `json:"commands"`
 }
 
 // AgentInstructions builds versioned structured agent guidance.
@@ -110,8 +112,9 @@ func AgentInstructions() Instructions {
 		}
 	}
 	return Instructions{
-		Schema:  InstructionsSchema,
-		Purpose: "Exchange short-lived messages and pointers among independent local agent sessions.",
+		Environment: EnvironmentReference,
+		Schema:      InstructionsSchema,
+		Purpose:     "Exchange short-lived messages and pointers among independent local agent sessions.",
 		Guarantees: []string{
 			"A successful publish has been accepted into the authoritative store.",
 			"Publishing requires an existing follow: run comms topic follow TOPIC first; publishing does not follow implicitly.",
@@ -178,6 +181,7 @@ func InstructionsText() string {
 	for _, command := range instructions.Commands {
 		fmt.Fprintf(&output, "- %s\n", command)
 	}
+	fmt.Fprintln(&output, "\n"+instructions.Environment)
 	return output.String()
 }
 
@@ -296,7 +300,11 @@ func CommandHelp(program string, commandArgs ...string) (string, error) {
 			}
 			opTokens := extractCommandTokens(op.CLI)
 			if strings.Join(opTokens, " ") == prefix {
-				matches = append(matches, renderOperationHelp(program, op))
+				text := renderOperationHelp(program, op)
+				if op.ID == "service.serve" {
+					text += "\n" + EnvironmentReference
+				}
+				matches = append(matches, text)
 			}
 		}
 		if len(matches) > 0 {
