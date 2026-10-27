@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestMigrationRunnerUpgradesALegacyDatabaseInPlace(t *testing.T) {
 		t.Fatalf("message_retrievals missing after migration: %v", e)
 	}
 	report, e := adapter.Doctor(context.Background())
-	if e != nil || !report.Healthy || report.Checks["schema_version"] != "3" {
+	if e != nil || !report.Healthy || report.Checks["schema_version"] != strconv.Itoa(schemaVersion) {
 		t.Fatalf("doctor=%#v %v", report, e)
 	}
 }

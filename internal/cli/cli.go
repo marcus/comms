@@ -1462,6 +1462,7 @@ func setBool(q url.Values, key string, value bool) {
 type usageError struct{ message string }
 
 func (e usageError) Error() string { return e.message }
+func (e usageError) Unwrap() error { return domain.ErrInvalid }
 func usage(message string) error   { return usageError{message: message} }
 func fail(env Env, jsonOutput bool, err error) int {
 	code := 1
@@ -1513,9 +1514,9 @@ func fail(env Env, jsonOutput bool, err error) int {
 				details["action"] = re.action
 			}
 		}
-		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: err.Error(), Details: details}})
+		_ = json.NewEncoder(env.Stderr).Encode(httpapi.ErrorEnvelope{Error: httpapi.ErrorBody{Code: stable, Message: app.PublicErrorMessage(err), Details: details}})
 	} else {
-		_, _ = fmt.Fprintf(env.Stderr, "comms: %v\n", err)
+		_, _ = fmt.Fprintf(env.Stderr, "comms: %s\n", app.PublicErrorMessage(err))
 		var se *startupError
 		var re *restartRequiredError
 		expired := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)

@@ -54,7 +54,8 @@ func resolveMessage(ctx context.Context, q interface {
 	return m, e
 }
 
-func (a *Adapter) Publish(ctx context.Context, p app.PreparedMessage) (domain.Message, error) {
+func (a *Adapter) Publish(ctx context.Context, p app.PreparedMessage) (_ domain.Message, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, p.Mutation, "publish", p.Now, func(tx *sql.Tx) (domain.Message, error) {
 		author, e := resolveAgent(ctx, tx, p.Author, p.Now)
 		if e != nil {
@@ -78,7 +79,8 @@ func (a *Adapter) Publish(ctx context.Context, p app.PreparedMessage) (domain.Me
 	})
 }
 
-func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (domain.Message, error) {
+func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (_ domain.Message, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, p.Mutation, "direct_send", p.Now, func(tx *sql.Tx) (domain.Message, error) {
 		author, e := resolveAgent(ctx, tx, p.Author, p.Now)
 		if e != nil {
@@ -142,7 +144,8 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (domain
 	})
 }
 
-func (a *Adapter) Reply(ctx context.Context, p app.PreparedMessage) (domain.Message, error) {
+func (a *Adapter) Reply(ctx context.Context, p app.PreparedMessage) (_ domain.Message, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, p.Mutation, "reply", p.Now, func(tx *sql.Tx) (domain.Message, error) {
 		author, e := resolveAgent(ctx, tx, p.Author, p.Now)
 		if e != nil {
@@ -296,7 +299,8 @@ func inboxVisibleArgs(req app.MessageListRequest, agent domain.AgentID, now time
 	return []any{micros(now), req.UnreadOnly, req.IncludeSelf, agent, req.Kind, req.Kind}
 }
 
-func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now time.Time) (app.Page[domain.Message], error) {
+func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now time.Time) (_ app.Page[domain.Message], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	ag, e := resolveAgent(ctx, a.read, req.Agent, now)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
@@ -323,7 +327,8 @@ func (a *Adapter) Inbox(ctx context.Context, req app.MessageListRequest, now tim
 	return pageMessages(ctx, a.read, query, args, req.Limit, true)
 }
 
-func (a *Adapter) ResolveWait(ctx context.Context, req app.MessageWaitRequest, now time.Time) (app.ResolvedWait, error) {
+func (a *Adapter) ResolveWait(ctx context.Context, req app.MessageWaitRequest, now time.Time) (_ app.ResolvedWait, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	ag, e := resolveAgent(ctx, a.read, req.Agent, now)
 	if e != nil {
 		return app.ResolvedWait{}, e
@@ -348,7 +353,8 @@ func (a *Adapter) ResolveWait(ctx context.Context, req app.MessageWaitRequest, n
 	return out, nil
 }
 
-func (a *Adapter) MatchingMessages(ctx context.Context, req app.MessageWaitRequest, resolved app.ResolvedWait, now time.Time) (app.MessageWaitResponse, error) {
+func (a *Adapter) MatchingMessages(ctx context.Context, req app.MessageWaitRequest, resolved app.ResolvedWait, now time.Time) (_ app.MessageWaitResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	stamp, id, e := pairCursor(req.After)
 	if e != nil {
 		return app.MessageWaitResponse{}, e
@@ -382,7 +388,8 @@ func (a *Adapter) MatchingMessages(ctx context.Context, req app.MessageWaitReque
 	}
 	return out, nil
 }
-func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest, now time.Time) (app.Page[domain.Message], error) {
+func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest, now time.Time) (_ app.Page[domain.Message], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	t, e := resolveTopic(ctx, a.read, req.Topic)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
@@ -402,7 +409,8 @@ func (a *Adapter) TopicMessages(ctx context.Context, req app.MessageListRequest,
 	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE topic_id=? AND (expires_at IS NULL OR expires_at>?) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
 	return pageMessages(ctx, a.read, query, []any{t.ID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
 }
-func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Time) (app.Page[domain.Message], error) {
+func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Time) (_ app.Page[domain.Message], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	m, e := resolveMessage(ctx, a.read, req.Message)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
@@ -422,7 +430,8 @@ func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Ti
 	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
 	return pageMessages(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
 }
-func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (domain.Message, error) {
+func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (_ domain.Message, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	m, e := resolveMessage(ctx, a.read, ref)
 	if e != nil {
 		return m, e
@@ -440,7 +449,8 @@ func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (domain.M
 	return m, nil
 }
 
-func (a *Adapter) ReadThrough(ctx context.Context, req app.ReadThroughRequest, now time.Time) (app.ReadThroughResponse, error) {
+func (a *Adapter) ReadThrough(ctx context.Context, req app.ReadThroughRequest, now time.Time) (_ app.ReadThroughResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "read_through", now, func(tx *sql.Tx) (app.ReadThroughResponse, error) {
 		ag, e := resolveAgent(ctx, tx, req.Agent, now)
 		if e != nil {
@@ -483,7 +493,8 @@ func (a *Adapter) ReadThrough(ctx context.Context, req app.ReadThroughRequest, n
 // retrieval activity of every identified reader. Subscription membership is
 // judged live here rather than stored on a retrieval row, because follow and
 // unfollow move it after the read happened.
-func (a *Adapter) Receipts(ctx context.Context, ref string, now time.Time) (app.ReceiptReport, error) {
+func (a *Adapter) Receipts(ctx context.Context, ref string, now time.Time) (_ app.ReceiptReport, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	out := app.ReceiptReport{Subscribers: []app.Receipt{}, Inspectors: []app.Inspector{}}
 	m, e := resolveMessage(ctx, a.read, ref)
 	if e != nil {
@@ -577,7 +588,8 @@ const retrievalUpsert = "INSERT INTO message_retrievals(message_id,agent_id,firs
 // rather than failing the batch, because a read must never fail because its
 // bookkeeping could not be attributed. A message the reader wrote is skipped by
 // the statement itself, as is a message that no longer exists.
-func (a *Adapter) RecordRetrievals(ctx context.Context, events []app.RetrievalEvent) error {
+func (a *Adapter) RecordRetrievals(ctx context.Context, events []app.RetrievalEvent) (storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	if len(events) == 0 {
 		return nil
 	}
@@ -617,7 +629,8 @@ func (a *Adapter) RecordRetrievals(ctx context.Context, events []app.RetrievalEv
 	return e
 }
 
-func (a *Adapter) Search(ctx context.Context, req app.SearchRequest, now time.Time) (app.Page[domain.Message], error) {
+func (a *Adapter) Search(ctx context.Context, req app.SearchRequest, now time.Time) (_ app.Page[domain.Message], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	stamp, id, e := descendingCursor(req.Cursor)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
@@ -648,7 +661,8 @@ func literalFTSQuery(input string) string {
 	}
 	return strings.Join(terms, " ")
 }
-func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.Time) (app.ObserveResponse, error) {
+func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.Time) (_ app.ObserveResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	var out app.ObserveResponse
 	var topicID string
 	if req.Topic != "" {
@@ -736,7 +750,8 @@ func prefixedAgentCols(alias string) string {
 // ReadThroughAll captures high-water marks inside the serialized writer transaction.
 // A time cursor bounds a contiguous sequence prefix, so a later arrival cannot
 // be skipped over even when timestamps or IDs sort differently from sequences.
-func (a *Adapter) ReadThroughAll(ctx context.Context, req app.ReadThroughAllRequest, now time.Time) (app.ReadThroughAllResponse, error) {
+func (a *Adapter) ReadThroughAll(ctx context.Context, req app.ReadThroughAllRequest, now time.Time) (_ app.ReadThroughAllResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	stamp, id, e := pairCursor(req.Before)
 	if e != nil {
 		return app.ReadThroughAllResponse{}, e

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 
 	"github.com/marcus/comms/internal/app"
 	"github.com/marcus/comms/internal/domain"
@@ -29,7 +29,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type Options struct {
 	Path            string
@@ -79,7 +79,8 @@ func ResolveStatePath(create bool) (string, error) {
 	return filepath.Join(dir, "comms.db"), nil
 }
 
-func Open(ctx context.Context, opts Options) (*Adapter, error) {
+func Open(ctx context.Context, opts Options) (_ *Adapter, err error) {
+	defer func() { err = translate(err) }()
 	path := opts.Path
 	if path == "" {
 		var e error
@@ -263,17 +264,48 @@ func migrate(ctx context.Context, db *sql.DB) error {
 // applyMigration runs one step and records its version in the same transaction,
 // so a failure leaves the database at the previous version rather than half
 // upgraded.
-func applyMigration(ctx context.Context, db *sql.DB, m migration, now int64) error {
-	tx, e := db.BeginTx(ctx, nil)
-	if e != nil {
-		return e
+func applyMigration(ctx context.Context, db *sql.DB, m migration, now int64) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	// Rebuild the referenced agents table without rewriting child references.
+	// Foreign keys are restored on this same connection after commit/rollback.
+	if m.version == 4 {
+		if _, err = conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+			return err
+		}
+		defer func() {
+			_, restoreErr := conn.ExecContext(context.Background(), "PRAGMA foreign_keys=ON")
+			err = errors.Join(err, restoreErr)
+		}()
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, e = tx.ExecContext(ctx, m.body); e != nil {
-		return fmt.Errorf("migration %d: %w", m.version, e)
+	if _, err = tx.ExecContext(ctx, m.body); err != nil {
+		return fmt.Errorf("migration %d: %w", m.version, err)
 	}
-	if _, e = tx.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)", m.version, now); e != nil {
-		return e
+	if m.version == 4 {
+		rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+		if err != nil {
+			return err
+		}
+		invalid := rows.Next()
+		rowErr := rows.Err()
+		_ = rows.Close()
+		if rowErr != nil {
+			return rowErr
+		}
+		if invalid {
+			return errors.New("migration violates stored reference integrity")
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?,?)", m.version, now); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -334,12 +366,13 @@ func (a *Adapter) submit(ctx context.Context, fn func(*sql.Conn) (any, error)) (
 	}
 	select {
 	case r := <-req.result:
-		return r.value, r.err
+		return r.value, translate(r.err)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
-func (a *Adapter) Close() error {
+func (a *Adapter) Close() (storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	var out error
 	a.closeOnce.Do(func() {
 		a.sendMu.Lock()
@@ -357,7 +390,8 @@ func (a *Adapter) Close() error {
 	return out
 }
 
-func (a *Adapter) Handshake(context.Context) (app.Handshake, error) {
+func (a *Adapter) Handshake(context.Context) (_ app.Handshake, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return app.Handshake{StoreID: a.storeID, ProtocolVersion: app.ProtocolVersion, SchemaVersion: schemaVersion, Capabilities: []string{"agents", "topics", "subscriptions", "messages", "direct", "threads", "receipts", "search", "retention", "observe", "export"}}, nil
 }
 
@@ -400,16 +434,25 @@ func decodeCursor(v string, want int) ([]string, error) {
 	return p, nil
 }
 
+// translate removes driver causes entirely: callers receive only application
+// errors. Extended constraint codes all share the primary code in the low byte.
 func translate(err error) error {
 	if err == nil {
 		return nil
 	}
-	s := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(s, "unique constraint"), strings.Contains(s, "constraint failed"):
-		return fmt.Errorf("%w: %w", app.ErrConflict, err)
-	default:
+	var driver *sqlite.Error
+	if !errors.As(err, &driver) {
 		return err
+	}
+	switch driver.Code() & 0xff {
+	case 19:
+		return fmt.Errorf("%w: storage constraint rejected the operation", app.ErrConflict)
+	case 5, 6, 8, 14:
+		return fmt.Errorf("%w: storage is temporarily unavailable", app.ErrUnavailable)
+	case 9:
+		return context.Canceled
+	default:
+		return fmt.Errorf("%w: storage operation failed", app.ErrInternal)
 	}
 }
 
@@ -477,14 +520,33 @@ func scanAgent(s interface{ Scan(...any) error }) (domain.Agent, error) {
 const agentCols = "id,handle,display_name,purpose,harness,project,session_ref,created_at,updated_at,last_seen_at,retired_at"
 
 func resolveAgent(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, ref string, now time.Time) (domain.Agent, error) {
-	row := q.QueryRowContext(ctx, "SELECT "+agentCols+" FROM agents WHERE id=? OR handle=? COLLATE NOCASE OR id=(SELECT agent_id FROM agent_aliases WHERE handle=? COLLATE NOCASE AND expires_at>?) ORDER BY CASE WHEN id=? THEN 0 WHEN handle=? COLLATE NOCASE THEN 1 ELSE 2 END LIMIT 1", ref, ref, ref, micros(now), ref, ref)
-	a, e := scanAgent(row)
-	if errors.Is(e, sql.ErrNoRows) {
-		return a, fmt.Errorf("%w: agent %q", app.ErrNotFound, ref)
+	ref = strings.TrimPrefix(ref, "@")
+	rows, err := q.QueryContext(ctx, "SELECT "+agentCols+" FROM agents WHERE id=? OR handle=? COLLATE NOCASE OR id=(SELECT x.agent_id FROM agent_aliases x JOIN agents owner ON owner.id=x.agent_id WHERE x.handle=? COLLATE NOCASE AND x.expires_at>? AND owner.retired_at IS NULL) ORDER BY CASE WHEN id=? THEN 0 WHEN retired_at IS NULL THEN 1 ELSE 2 END,created_at DESC,id DESC LIMIT 2", ref, ref, ref, micros(now), ref)
+	if err != nil {
+		return domain.Agent{}, err
 	}
-	return a, e
+	defer func() { _ = rows.Close() }()
+	var matches []domain.Agent
+	for rows.Next() {
+		agent, err := scanAgent(rows)
+		if err != nil {
+			return domain.Agent{}, err
+		}
+		matches = append(matches, agent)
+	}
+	if err = rows.Err(); err != nil {
+		return domain.Agent{}, err
+	}
+	if len(matches) == 0 {
+		return domain.Agent{}, fmt.Errorf("%w: agent %q", app.ErrNotFound, ref)
+	}
+	agent := matches[0]
+	if string(agent.ID) != ref && agent.RetiredAt != nil && len(matches) > 1 {
+		return domain.Agent{}, fmt.Errorf("%w: handle %q matches multiple retired agents; use a stable agent ID", app.ErrConflict, ref)
+	}
+	return agent, nil
 }
 func scanTopic(s interface{ Scan(...any) error }) (domain.Topic, error) {
 	var t domain.Topic

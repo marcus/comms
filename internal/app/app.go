@@ -14,7 +14,7 @@ import (
 
 const (
 	ProtocolVersion = 1
-	SchemaVersion   = 3
+	SchemaVersion   = 4
 	DefaultLimit    = 50
 	MaxLimit        = 500
 	// InboxDefaultLimit keeps the attention surface small. The inbox is
@@ -26,6 +26,7 @@ const (
 )
 
 var (
+	ErrInternal    = errors.New("internal error")
 	ErrNotFound    = errors.New("not found")
 	ErrConflict    = errors.New("conflict")
 	ErrUnavailable = errors.New("unavailable")

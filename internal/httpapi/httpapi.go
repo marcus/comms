@@ -762,7 +762,7 @@ func (h *Handler) respond(w http.ResponseWriter, value any, err error) {
 	if err != nil {
 		status, code := classify(err)
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(ErrorEnvelope{Error: ErrorBody{Code: code, Message: err.Error(), Details: map[string]any{}}})
+		_ = json.NewEncoder(w).Encode(ErrorEnvelope{Error: ErrorBody{Code: code, Message: app.PublicErrorMessage(err), Details: map[string]any{}}})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(responseEnvelope{Schema: ResponseSchema, Data: value})

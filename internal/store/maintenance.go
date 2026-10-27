@@ -10,7 +10,8 @@ import (
 	"github.com/marcus/comms/internal/domain"
 )
 
-func (a *Adapter) RetentionStatus(ctx context.Context, now time.Time) (app.RetentionStatus, error) {
+func (a *Adapter) RetentionStatus(ctx context.Context, now time.Time) (_ app.RetentionStatus, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	var out app.RetentionStatus
 	e := a.read.QueryRowContext(ctx, "SELECT COALESCE(sum(CASE WHEN expires_at IS NULL OR expires_at>? THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN expires_at<=? THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN NOT EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=messages.thread_root_id AND (live.expires_at IS NULL OR live.expires_at>?)) THEN 1 ELSE 0 END),0) FROM messages", micros(now), micros(now), micros(now)).Scan(&out.LiveMessages, &out.ExpiredMessages, &out.PurgeableMessages)
 	if e != nil {
@@ -30,7 +31,8 @@ func (a *Adapter) RetentionStatus(ctx context.Context, now time.Time) (app.Reten
 	return out, nil
 }
 
-func (a *Adapter) Purge(ctx context.Context, req app.PurgeRequest, id domain.PurgeRunID, now time.Time) (app.PurgeRun, error) {
+func (a *Adapter) Purge(ctx context.Context, req app.PurgeRequest, id domain.PurgeRunID, now time.Time) (_ app.PurgeRun, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "purge", now, func(tx *sql.Tx) (app.PurgeRun, error) {
 		run := app.PurgeRun{ID: id, StartedAt: now}
 		var count int64
@@ -63,7 +65,8 @@ func (a *Adapter) Purge(ctx context.Context, req app.PurgeRequest, id domain.Pur
 	})
 }
 
-func (a *Adapter) Snapshot(ctx context.Context) (app.Snapshot, error) {
+func (a *Adapter) Snapshot(ctx context.Context) (_ app.Snapshot, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	out := app.Snapshot{StoreID: a.storeID, Agents: []domain.Agent{}, Aliases: []app.AliasRecord{}, AgentExternalRefs: []app.ExternalAgentRefRecord{}, Topics: []domain.Topic{}, TopicExternalRefs: []app.ExternalTopicRefRecord{}, Subscriptions: []domain.Subscription{}, Messages: []domain.Message{}, Retrievals: []app.RetrievalRecord{}}
 	rows, e := a.read.QueryContext(ctx, "SELECT "+agentCols+" FROM agents ORDER BY id")
 	if e != nil {
@@ -185,14 +188,16 @@ func (a *Adapter) Snapshot(ctx context.Context) (app.Snapshot, error) {
 	return out, nil
 }
 
-func (a *Adapter) Doctor(ctx context.Context) (app.DoctorReport, error) {
+func (a *Adapter) Doctor(ctx context.Context) (_ app.DoctorReport, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	out := app.DoctorReport{Healthy: true, Checks: map[string]string{}}
 	var integrity string
 	if e := a.read.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&integrity); e != nil {
 		return out, e
 	}
-	out.Checks["sqlite_integrity"] = integrity
+	out.Checks["sqlite_integrity"] = "ok"
 	if integrity != "ok" {
+		out.Checks["sqlite_integrity"] = "failed"
 		out.Healthy = false
 	}
 	var mode string

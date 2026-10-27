@@ -13,7 +13,8 @@ import (
 	"github.com/marcus/comms/internal/domain"
 )
 
-func (a *Adapter) JoinAgent(ctx context.Context, req app.JoinRequest, fresh domain.Agent, now time.Time) (app.JoinResponse, error) {
+func (a *Adapter) JoinAgent(ctx context.Context, req app.JoinRequest, fresh domain.Agent, now time.Time) (_ app.JoinResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "join", now, func(tx *sql.Tx) (app.JoinResponse, error) {
 		if req.ExternalRef != nil {
 			var id string
@@ -37,6 +38,13 @@ func (a *Adapter) JoinAgent(ctx context.Context, req app.JoinRequest, fresh doma
 				return app.JoinResponse{}, e
 			}
 		}
+		var active int
+		if e := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM agents WHERE handle=? COLLATE NOCASE AND retired_at IS NULL)", fresh.Handle).Scan(&active); e != nil {
+			return app.JoinResponse{}, e
+		}
+		if active != 0 {
+			return app.JoinResponse{}, fmt.Errorf("%w: handle %q is held by an active agent", app.ErrConflict, fresh.Handle)
+		}
 		var collision int
 		if e := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM agent_aliases WHERE handle=? COLLATE NOCASE AND expires_at>?)", fresh.Handle, micros(now)).Scan(&collision); e != nil {
 			return app.JoinResponse{}, e
@@ -57,7 +65,8 @@ func (a *Adapter) JoinAgent(ctx context.Context, req app.JoinRequest, fresh doma
 	})
 }
 
-func (a *Adapter) GetAgent(ctx context.Context, ref string, touch bool, now time.Time) (domain.Agent, error) {
+func (a *Adapter) GetAgent(ctx context.Context, ref string, touch bool, now time.Time) (_ domain.Agent, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	if strings.TrimSpace(ref) == "" {
 		return domain.Agent{}, fmt.Errorf("%w: agent is required", domain.ErrInvalid)
 	}
@@ -89,7 +98,8 @@ func (a *Adapter) GetAgent(ctx context.Context, ref string, touch bool, now time
 	return v.(domain.Agent), nil
 }
 
-func (a *Adapter) UpdateAgent(ctx context.Context, req app.UpdateAgentRequest, now time.Time) (domain.Agent, error) {
+func (a *Adapter) UpdateAgent(ctx context.Context, req app.UpdateAgentRequest, now time.Time) (_ domain.Agent, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "update_agent", now, func(tx *sql.Tx) (domain.Agent, error) {
 		ag, e := resolveAgent(ctx, tx, req.Agent, now)
 		if e != nil {
@@ -100,7 +110,7 @@ func (a *Adapter) UpdateAgent(ctx context.Context, req app.UpdateAgentRequest, n
 		}
 		if req.Handle != nil && !strings.EqualFold(*req.Handle, ag.Handle) {
 			var collision int
-			e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM agents WHERE handle=? COLLATE NOCASE AND id<>? UNION ALL SELECT 1 FROM agent_aliases WHERE handle=? COLLATE NOCASE AND expires_at>?)", *req.Handle, ag.ID, *req.Handle, micros(now)).Scan(&collision)
+			e = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM agents WHERE handle=? COLLATE NOCASE AND id<>? AND retired_at IS NULL UNION ALL SELECT 1 FROM agent_aliases WHERE handle=? COLLATE NOCASE AND expires_at>?)", *req.Handle, ag.ID, *req.Handle, micros(now)).Scan(&collision)
 			if e != nil {
 				return ag, e
 			}
@@ -136,7 +146,8 @@ func (a *Adapter) UpdateAgent(ctx context.Context, req app.UpdateAgentRequest, n
 	})
 }
 
-func (a *Adapter) RetireAgent(ctx context.Context, req app.RetireAgentRequest, now time.Time) (domain.Agent, error) {
+func (a *Adapter) RetireAgent(ctx context.Context, req app.RetireAgentRequest, now time.Time) (_ domain.Agent, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "retire_agent", now, func(tx *sql.Tx) (domain.Agent, error) {
 		ag, e := resolveAgent(ctx, tx, req.Agent, now)
 		if e != nil {
@@ -152,11 +163,15 @@ func (a *Adapter) RetireAgent(ctx context.Context, req app.RetireAgentRequest, n
 				return ag, e
 			}
 		}
+		if _, e = tx.ExecContext(ctx, "DELETE FROM agent_aliases WHERE agent_id=?", ag.ID); e != nil {
+			return ag, e
+		}
 		return ag, nil
 	})
 }
 
-func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now time.Time) (app.Page[domain.Agent], error) {
+func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now time.Time) (_ app.Page[domain.Agent], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	p, e := decodeCursor(req.Cursor, 3)
 	if e != nil {
 		return app.Page[domain.Agent]{}, e
@@ -193,14 +208,16 @@ func (a *Adapter) ListAgents(ctx context.Context, req app.AgentListRequest, now 
 	return out, nil
 }
 
-func (a *Adapter) CreateTopic(ctx context.Context, req app.CreateTopicRequest, t domain.Topic, now time.Time) (domain.Topic, error) {
+func (a *Adapter) CreateTopic(ctx context.Context, req app.CreateTopicRequest, t domain.Topic, now time.Time) (_ domain.Topic, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "create_topic", now, func(tx *sql.Tx) (domain.Topic, error) {
 		_, e := tx.ExecContext(ctx, "INSERT INTO topics("+topicInsertCols+") VALUES(?,?,?,?,?,?,?,?,NULL)", t.ID, t.Name, domain.TopicNameKey(t.Name), t.Kind, t.Description, t.NextSequence, micros(now), micros(now))
 		return t, e
 	})
 }
 
-func (a *Adapter) EnsureTopic(ctx context.Context, req app.EnsureTopicRequest, fresh domain.Topic, now time.Time) (app.EnsureTopicResponse, error) {
+func (a *Adapter) EnsureTopic(ctx context.Context, req app.EnsureTopicRequest, fresh domain.Topic, now time.Time) (_ app.EnsureTopicResponse, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "ensure_topic", now, func(tx *sql.Tx) (app.EnsureTopicResponse, error) {
 		var id string
 		e := tx.QueryRowContext(ctx, "SELECT topic_id FROM topic_external_refs WHERE namespace=? AND external_key=?", req.ExternalRef.Namespace, req.ExternalRef.Key).Scan(&id)
@@ -239,7 +256,8 @@ func (a *Adapter) EnsureTopic(ctx context.Context, req app.EnsureTopicRequest, f
 	})
 }
 
-func (a *Adapter) UpdateTopic(ctx context.Context, req app.UpdateTopicRequest, now time.Time) (domain.Topic, error) {
+func (a *Adapter) UpdateTopic(ctx context.Context, req app.UpdateTopicRequest, now time.Time) (_ domain.Topic, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "update_topic", now, func(tx *sql.Tx) (domain.Topic, error) {
 		t, e := resolveTopic(ctx, tx, req.Topic)
 		if e != nil {
@@ -276,7 +294,8 @@ func uniqueTopicName(ctx context.Context, tx *sql.Tx, base string) (string, erro
 		}
 	}
 }
-func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest, now time.Time) (domain.Topic, error) {
+func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest, now time.Time) (_ domain.Topic, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "archive_topic", now, func(tx *sql.Tx) (domain.Topic, error) {
 		t, e := resolveTopic(ctx, tx, req.Topic)
 		if e != nil {
@@ -294,7 +313,8 @@ func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest,
 	})
 }
 
-func (a *Adapter) ListTopics(ctx context.Context, req app.TopicListRequest, agent string, now time.Time) (app.Page[domain.Topic], error) {
+func (a *Adapter) ListTopics(ctx context.Context, req app.TopicListRequest, agent string, now time.Time) (_ app.Page[domain.Topic], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	p, e := decodeCursor(req.Cursor, 2)
 	if e != nil {
 		return app.Page[domain.Topic]{}, e
@@ -338,7 +358,8 @@ func scanSubscription(s interface{ Scan(...any) error }) (domain.Subscription, e
 
 const subscriptionCols = "agent_id,topic_id,followed_at,unfollowed_at,read_through_sequence,read_through_at,updated_at"
 
-func (a *Adapter) Follow(ctx context.Context, req app.FollowRequest, now time.Time) (domain.Subscription, error) {
+func (a *Adapter) Follow(ctx context.Context, req app.FollowRequest, now time.Time) (_ domain.Subscription, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "follow", now, func(tx *sql.Tx) (domain.Subscription, error) {
 		ag, e := resolveAgent(ctx, tx, req.Agent, now)
 		if e != nil {
@@ -381,7 +402,8 @@ func (a *Adapter) Follow(ctx context.Context, req app.FollowRequest, now time.Ti
 		return sub, e
 	})
 }
-func (a *Adapter) Unfollow(ctx context.Context, req app.UnfollowRequest, now time.Time) (domain.Subscription, error) {
+func (a *Adapter) Unfollow(ctx context.Context, req app.UnfollowRequest, now time.Time) (_ domain.Subscription, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	return withMutation(ctx, a, req.Mutation, "unfollow", now, func(tx *sql.Tx) (domain.Subscription, error) {
 		ag, e := resolveAgent(ctx, tx, req.Agent, now)
 		if e != nil {
@@ -410,7 +432,8 @@ func (a *Adapter) Unfollow(ctx context.Context, req app.UnfollowRequest, now tim
 	})
 }
 
-func (a *Adapter) ListSubscriptions(ctx context.Context, req app.SubscriptionListRequest, now time.Time) (app.Page[domain.Subscription], error) {
+func (a *Adapter) ListSubscriptions(ctx context.Context, req app.SubscriptionListRequest, now time.Time) (_ app.Page[domain.Subscription], storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	ag, e := resolveAgent(ctx, a.read, req.Agent, now)
 	if e != nil {
 		return app.Page[domain.Subscription]{}, e
@@ -444,7 +467,8 @@ func (a *Adapter) ListSubscriptions(ctx context.Context, req app.SubscriptionLis
 }
 
 // GetTopic is trusted-local inspection, including direct topics and their two members.
-func (a *Adapter) GetTopic(ctx context.Context, ref string) (app.TopicDetails, error) {
+func (a *Adapter) GetTopic(ctx context.Context, ref string) (_ app.TopicDetails, storageErr error) {
+	defer func() { storageErr = translate(storageErr) }()
 	topic, err := resolveTopic(ctx, a.read, ref)
 	if err != nil {
 		return app.TopicDetails{}, err

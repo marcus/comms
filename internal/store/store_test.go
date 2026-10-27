@@ -1229,8 +1229,8 @@ func TestWaitForAgentRefusesRetiredHandlesAndFollowsRenames(t *testing.T) {
 	if _, e := sys.service.RetireAgent(ctx, app.RetireAgentRequest{Agent: string(retiring.ID)}); e != nil {
 		t.Fatal(e)
 	}
-	// A retired handle stays taken, so this is a conflict rather than a wait
-	// that can only ever expire.
+	// A retired record does not become active again. Until a new agent claims
+	// the handle, a wait resolving to that retired record reports conflict.
 	if _, e := sys.service.WaitForAgent(ctx, app.AgentWaitRequest{Agent: "retiring", Timeout: time.Minute}); !errors.Is(e, app.ErrConflict) {
 		t.Fatalf("retired handle = %v, want conflict", e)
 	}
