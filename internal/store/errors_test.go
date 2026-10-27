@@ -13,8 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/marcus/comms/internal/app"
 	"modernc.org/sqlite"
+
+	"github.com/marcus/comms/internal/app"
 )
 
 func TestEveryConstraintClassIsMappedWithoutDriverText(t *testing.T) {

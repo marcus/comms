@@ -98,6 +98,18 @@ Upgrades of a Homebrew-supervised install use `brew services restart comms`. Do 
 
 ---
 
+## Clients during service restart
+
+During `brew services restart comms`, an in-flight long poll can finish with `canceled` (HTTP 503, CLI exit 5). Keep its last saved continuation cursor and issue the next wait with that cursor; no acknowledgment is implied. Ordinary CLI commands wait through transient connection errors and starting/stopping owners within the existing readiness bound: at most 20 seconds, or a shorter positive global `--timeout` or parent context. A long message-wait timeout does not extend service readiness. If readiness is not restored in that window, the CLI returns structured `unavailable` (exit 5, `details.phase: "readiness"`) with a retry/supervisor hint. Parent cancellation and parent deadlines keep their `canceled`/`timeout` codes.
+
+The service handshake (`hello`, `GET /v1/hello`) and JSON status add `readiness`: `starting`, `ready` or `stopping`. Older handshakes that omit it remain supported. Health returns `unavailable`/HTTP 503 while starting or stopping. Inspect-only commands do not start a daemon or wait for a restart.
+
+A supervised Unix service records ownership in a private `SOCKET.supervised` marker before serving. The marker survives socket removal and service stop, so new clients wait for the supervisor instead of launching a competing auto daemon; they also wait while the database owner still holds its lock. A compatible supervised winner satisfies readiness even if a racing auto-start child exits with unavailable. The first upgraded supervised start establishes the marker; recovery from a losing child also works without one. `--no-auto-start` still permits waiting for known supervisor ownership, while refusing to spawn.
+
+A deliberately stopped supervised service stays supervisor-owned: use `brew services start comms`. To switch to foreground ownership, stop Homebrew and explicitly run `comms serve` with the same state/socket settings; the new owner clears the marker after acquiring the database lock. CLI `stop` and `restart` do not take control away from Homebrew.
+
+---
+
 ## Core Concepts
 
 - **Agents (`agt_...`):** Addressable logical sessions. Handles (e.g. `@alice`) are mutable and unique; stable internal IDs never change.

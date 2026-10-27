@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marcus/comms/internal/domain"
@@ -22,6 +23,8 @@ type controller struct {
 	status       httpapi.LifecycleStatus
 	shutdownCh   chan struct{}
 	shutdownOnce sync.Once
+	ready        atomic.Bool
+	stopping     atomic.Bool
 }
 
 func newController(cfg Config) (*controller, error) {
@@ -48,7 +51,17 @@ func newController(cfg Config) (*controller, error) {
 	}, nil
 }
 
-func (c *controller) Status() httpapi.LifecycleStatus { return c.status }
+func (c *controller) Status() httpapi.LifecycleStatus {
+	status := c.status
+	status.Readiness = "starting"
+	if c.ready.Load() {
+		status.Readiness = "ready"
+	}
+	if c.stopping.Load() {
+		status.Readiness = "stopping"
+	}
+	return status
+}
 
 func (c *controller) Done() <-chan struct{} { return c.shutdownCh }
 
@@ -56,6 +69,6 @@ func (c *controller) RequestShutdown(expectedID string) error {
 	if expectedID != c.status.ServerInstanceID {
 		return httpapi.ErrServerInstanceChanged
 	}
-	c.shutdownOnce.Do(func() { close(c.shutdownCh) })
+	c.shutdownOnce.Do(func() { c.stopping.Store(true); close(c.shutdownCh) })
 	return nil
 }

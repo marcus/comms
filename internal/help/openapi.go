@@ -172,6 +172,7 @@ type whoamiResponse struct {
 
 // Handshake is the HTTP hello payload: store handshake plus process lifecycle.
 type Handshake struct {
+	Readiness string `json:"readiness,omitempty"`
 	app.Handshake
 	ServerInstanceID string    `json:"server_instance_id,omitempty"`
 	PID              int       `json:"pid,omitempty"`

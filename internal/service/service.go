@@ -69,6 +69,9 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	defer func() { _ = adapter.Close() }()
+	if err = rememberSupervision(cfg); err != nil {
+		return err
+	}
 
 	application := app.NewService(adapter, domain.UTCClock{})
 	// The recorder must drain before the store closes, so every return path
@@ -101,6 +104,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cleanup()
 	}()
 
+	life.ready.Store(true)
 	serveResult := make(chan error, 1)
 	go func() {
 		err := server.Serve(listener)
@@ -115,6 +119,7 @@ func Run(ctx context.Context, cfg Config) error {
 	case <-ctx.Done():
 	case <-life.Done():
 	}
+	life.stopping.Store(true)
 	stopServing()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()

@@ -34,6 +34,7 @@ var ErrServerInstanceChanged = errors.New("server instance changed")
 
 // LifecycleStatus is process identity composed onto the HTTP handshake.
 type LifecycleStatus struct {
+	Readiness        string
 	ServerInstanceID string
 	PID              int
 	StartedAt        time.Time
@@ -234,6 +235,7 @@ func (h *Handler) handshake(w http.ResponseWriter, r *http.Request) {
 		if status.Version != "" {
 			out.ServerVersion = status.Version
 		}
+		out.Readiness = status.Readiness
 		out.ServerInstanceID = status.ServerInstanceID
 		out.PID = status.PID
 		out.StartedAt = status.StartedAt
@@ -277,7 +279,11 @@ func (h *Handler) instructions(w http.ResponseWriter, _ *http.Request) {
 func (h *Handler) openapi(w http.ResponseWriter, _ *http.Request) {
 	h.respond(w, help.OpenAPIDocument(), nil)
 }
-func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) health(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Err() != nil || (h.life != nil && h.life.Status().Readiness != "" && h.life.Status().Readiness != "ready") {
+		h.respond(w, nil, fmt.Errorf("%w: service is starting or stopping; retry", app.ErrUnavailable))
+		return
+	}
 	h.respond(w, map[string]string{"status": "ok"}, nil)
 }
 func (h *Handler) doctor(w http.ResponseWriter, r *http.Request) {

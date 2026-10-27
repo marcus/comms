@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -226,34 +227,59 @@ func (a replaceAction) String() string {
 	}
 }
 
+func readyHandshake(hs help.Handshake) bool { return hs.Readiness == "" || hs.Readiness == "ready" }
+
+func (r *runner) readinessEnded(ctx context.Context, logPath string) error {
+	if r.env.Context != nil && r.env.Context.Err() != nil {
+		err := r.env.Context.Err()
+		return startupFailure("readiness", logPath, err)
+	}
+	return startupFailure("readiness", logPath, fmt.Errorf("%w: service did not become ready within the startup bound; a supervised service may be restarting; retry or use brew services start/restart comms", app.ErrUnavailable))
+}
+
 func (r *runner) ensureReady(client *httpapi.Client) error {
 	ctx := r.readyContext()
-	hs, err := handshake(ctx, client)
-	if err == nil {
-		decision := r.lifecycleDecision(hs)
-		if err := gateFor(decision, hs); err != nil {
+	for attempt := 0; ; attempt++ {
+		hs, err := handshake(ctx, client)
+		if err == nil {
+			if !readyHandshake(hs) {
+				if err = waitBackoff(ctx, attempt); err != nil {
+					return r.readinessEnded(ctx, r.serverLogPath())
+				}
+				continue
+			}
+			decision := r.lifecycleDecision(hs)
+			if err = gateFor(decision, hs); err != nil {
+				return err
+			}
+			switch decision {
+			case replaceLegacy:
+				return legacyServerRestartRequired()
+			case replaceForeground, replaceSupervised:
+				return r.refuseLaunchMode(hs.LaunchMode)
+			case replaceAuto:
+				return r.reconcile(ctx, client)
+			default:
+				return nil
+			}
+		}
+		if ctx.Err() != nil {
+			return r.readinessEnded(ctx, r.serverLogPath())
+		}
+		if !transientReadinessError(err) {
 			return err
 		}
-		switch decision {
-		case replaceNone:
-			return nil
-		case replaceLegacy:
-			return legacyServerRestartRequired()
-		case replaceForeground, replaceSupervised:
-			return r.refuseLaunchMode(hs.LaunchMode)
-		case replaceAuto:
-			return r.reconcile(ctx, client)
-		default:
-			return nil
+		if r.policy != policyRestart && !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
+			supervised, markerErr := service.SupervisedSocket(r.socket)
+			if markerErr != nil {
+				return markerErr
+			}
+			if !supervised {
+				return err
+			}
 		}
+		return r.reconcile(ctx, client)
 	}
-	if !httpapi.IsAutoStartableDial(err) {
-		return err
-	}
-	if r.policy != policyRestart && !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
-		return err
-	}
-	return r.reconcile(ctx, client)
 }
 
 func (r *runner) reconcile(ctx context.Context, client *httpapi.Client) error {
@@ -267,12 +293,18 @@ func (r *runner) reconcile(ctx context.Context, client *httpapi.Client) error {
 }
 
 func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, logPath string) error {
-	for {
+	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return startupFailure("readiness", logPath, err)
+			return r.readinessEnded(ctx, logPath)
 		}
 		hs, err := handshake(ctx, client)
 		if err == nil {
+			if !readyHandshake(hs) {
+				if err = waitBackoff(ctx, attempt); err != nil {
+					return r.readinessEnded(ctx, logPath)
+				}
+				continue
+			}
 			decision := r.lifecycleDecision(hs)
 			if err := gateFor(decision, hs); err != nil {
 				return err
@@ -301,7 +333,24 @@ func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, lo
 				return nil
 			}
 		}
-		if !httpapi.IsAutoStartableDial(err) {
+		if !transientReadinessError(err) {
+			return err
+		}
+		supervised, markerErr := service.SupervisedSocket(r.socket)
+		if markerErr != nil {
+			return markerErr
+		}
+		released, lockErr := ownerLockReleased(r.dbLockPath())
+		if lockErr != nil {
+			return lockErr
+		}
+		if supervised || !released {
+			if err = waitBackoff(ctx, attempt); err != nil {
+				return r.readinessEnded(ctx, logPath)
+			}
+			continue
+		}
+		if r.policy != policyRestart && !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
 			return err
 		}
 		handle, err := r.spawnDaemon(ctx)
@@ -459,13 +508,6 @@ func (r *runner) buildVersion() string {
 	return buildinfo.Version
 }
 
-func (r *runner) buildCommit() string {
-	if r.env.Commit != "" {
-		return r.env.Commit
-	}
-	return buildinfo.Commit
-}
-
 func (r *runner) spawnDaemon(ctx context.Context) (DaemonHandle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -512,32 +554,57 @@ func (r *runner) resolvedExecutable() (string, error) {
 }
 
 func (r *runner) waitUntilReady(ctx context.Context, client *httpapi.Client, handle DaemonHandle, logPath string) error {
-	wantVersion := r.buildVersion()
-	wantCommit := r.buildCommit()
-	attempt := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return startupFailure("readiness", logPath, ctx.Err())
-		case <-handle.Done():
-			err := handle.Err()
-			if err == nil {
-				err = errors.New("daemon exited before becoming ready")
-			}
-			return startupFailure("readiness", logPath, err)
-		default:
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return r.readinessEnded(ctx, logPath)
 		}
+		// Inspect the actual owner before checking the competing child's exit.
 		hs, err := handshake(ctx, client)
-		if err == nil && hs.ServerInstanceID != "" && hs.LaunchMode == string(service.LaunchModeAuto) && hs.ServerVersion == wantVersion && hs.Commit == wantCommit {
-			if err := checkHandshakeCompatibility(hs); err != nil {
+		if err == nil && readyHandshake(hs) && hs.ServerInstanceID != "" {
+			decision := r.replacementDecision(hs)
+			if err = gateFor(decision, hs); err != nil {
 				return err
 			}
-			return nil
+			switch decision {
+			case replaceNone:
+				return nil
+			case replaceAuto:
+				// An older auto owner is not the requested replacement; wait boundedly.
+			case replaceForeground, replaceSupervised:
+				return r.refuseLaunchMode(hs.LaunchMode)
+			case replaceLegacy:
+				return legacyServerRestartRequired()
+			}
+		} else if err != nil && !transientReadinessError(err) {
+			if ctx.Err() != nil {
+				return r.readinessEnded(ctx, logPath)
+			}
+			return err
 		}
-		if err := waitBackoff(ctx, attempt); err != nil {
-			return startupFailure("readiness", logPath, err)
+		select {
+		case <-handle.Done():
+			childErr := handle.Err()
+			var exit *exec.ExitError
+			transient := errors.Is(childErr, app.ErrUnavailable) || (errors.As(childErr, &exit) && exit.ExitCode() == 5)
+			supervised, markerErr := service.SupervisedSocket(r.socket)
+			if markerErr != nil {
+				return markerErr
+			}
+			released, lockErr := ownerLockReleased(r.dbLockPath())
+			if lockErr != nil {
+				return lockErr
+			}
+			if !transient && !supervised && released {
+				if childErr == nil {
+					childErr = errors.New("daemon exited before becoming ready")
+				}
+				return startupFailure("readiness", logPath, childErr)
+			}
+		default:
 		}
-		attempt++
+		if err = waitBackoff(ctx, attempt); err != nil {
+			return r.readinessEnded(ctx, logPath)
+		}
 	}
 }
 
@@ -581,6 +648,16 @@ func (r *runner) dbLockPath() string {
 	return filepath.Join(dir, "comms.db.lock")
 }
 
+// An unavailable HTTP response can be transient; a permission-denied Unix
+// dial is not. The transport wraps both, so inspect its cause before retrying.
+func transientReadinessError(err error) bool {
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return httpapi.IsAutoStartableDial(err) || retryableTransportError(err)
+	}
+	return retryableTransportError(err) || errors.Is(err, app.ErrUnavailable)
+}
+
 func retryableTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -590,7 +667,12 @@ func retryableTransportError(err error) bool {
 	}
 	var op *net.OpError
 	if errors.As(err, &op) {
-		return true
+		if op.Timeout() {
+			return false
+		}
+		if op.Op == "dial" {
+			return httpapi.IsAutoStartableDial(err)
+		}
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
@@ -646,6 +728,7 @@ func (r *runner) serverLogPath() string {
 }
 
 type statusReport struct {
+	Readiness        string    `json:"readiness,omitempty"`
 	Running          bool      `json:"running"`
 	ServerInstanceID string    `json:"server_instance_id,omitempty"`
 	PID              int       `json:"pid,omitempty"`
@@ -663,6 +746,7 @@ func statusFromHandshake(hs help.Handshake, fallbackSocket string) statusReport 
 		socket = fallbackSocket
 	}
 	report := statusReport{
+		Readiness:        hs.Readiness,
 		Running:          true,
 		ServerInstanceID: hs.ServerInstanceID,
 		PID:              hs.PID,
