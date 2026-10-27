@@ -23,6 +23,8 @@ func TestInstalledSupervisorMatchesConfiguredPaths(t *testing.T) {
 	}{
 		{"defaults", "", filepath.Join(home, ".local/state/comms/comms.sock"), filepath.Join(home, ".local/state/comms/comms.db"), true},
 		{"different-store", "", "/tmp/isolated.sock", "/tmp/isolated.db", false},
+		{"same-socket-other-db", "", filepath.Join(home, ".local/state/comms/comms.sock"), "/tmp/isolated.db", true},
+		{"same-db-other-socket", "", "/tmp/isolated.sock", filepath.Join(home, ".local/state/comms/comms.db"), true},
 		{"environment", "<key>EnvironmentVariables</key><dict><key>COMMS_STATE_DIR</key><string>/tmp/comms-custom</string><key>COMMS_SOCKET</key><string>/tmp/comms-custom.sock</string></dict>", "/tmp/comms-custom.sock", "/tmp/comms-custom/comms.db", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

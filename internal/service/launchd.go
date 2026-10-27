@@ -27,8 +27,8 @@ func (v launchdValue) get(key string) launchdValue {
 	return launchdValue{}
 }
 
-// InstalledSupervisor matches the installed Homebrew job to this exact store
-// and socket. A different test/custom store must not inherit live ownership.
+// InstalledSupervisor matches either resource owned by the Homebrew job.
+// A custom service is independent only when both its store and socket differ.
 // Presence is supervisor intent, not job health; a failed job still owns it.
 func InstalledSupervisor(socket, database, home string) (bool, error) {
 	paths := []string{filepath.Join(home, "Library", "LaunchAgents", "homebrew.mxcl.comms.plist"), "/Library/LaunchAgents/homebrew.mxcl.comms.plist", "/Library/LaunchDaemons/homebrew.mxcl.comms.plist"}
@@ -90,7 +90,7 @@ func InstalledSupervisor(socket, database, home string) (bool, error) {
 				i++
 			}
 		}
-		if supervised && !tcp && filepath.Clean(socket) == filepath.Clean(jobSocket) && filepath.Clean(database) == filepath.Clean(jobDB) {
+		if supervised && !tcp && (filepath.Clean(socket) == filepath.Clean(jobSocket) || filepath.Clean(database) == filepath.Clean(jobDB)) {
 			return true, nil
 		}
 	}
