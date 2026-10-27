@@ -605,17 +605,18 @@ type scriptedRequest struct {
 }
 
 type scriptedServer struct {
-	mu           sync.Mutex
-	hello        help.Handshake
-	switchTo     help.Handshake
-	shutdownMode string
-	reqs         []scriptedRequest
-	shutdowns    []string
-	dropMethod   string
-	dropPath     string
-	dropsLeft    int
-	server       *http.Server
-	closeOnce    sync.Once
+	beforeShutdown func()
+	mu             sync.Mutex
+	hello          help.Handshake
+	switchTo       help.Handshake
+	shutdownMode   string
+	reqs           []scriptedRequest
+	shutdowns      []string
+	dropMethod     string
+	dropPath       string
+	dropsLeft      int
+	server         *http.Server
+	closeOnce      sync.Once
 }
 
 func startScriptedServer(t *testing.T, socket string, hello help.Handshake) *scriptedServer {
@@ -674,6 +675,7 @@ func (s *scriptedServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.reqs = append(s.reqs, scriptedRequest{Method: r.Method, Path: r.URL.Path, Body: body})
 	hello := s.hello
 	mode := s.shutdownMode
+	beforeShutdown := s.beforeShutdown
 	drop := s.dropsLeft > 0 && r.Method == s.dropMethod && r.URL.Path == s.dropPath
 	if drop {
 		s.dropsLeft--
@@ -697,6 +699,9 @@ func (s *scriptedServer) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/hello":
 		writeData(w, http.StatusOK, hello)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/admin/shutdown":
+		if beforeShutdown != nil {
+			beforeShutdown()
+		}
 		id, _ := body["server_instance_id"].(string)
 		s.mu.Lock()
 		s.shutdowns = append(s.shutdowns, id)

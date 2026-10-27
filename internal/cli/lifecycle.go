@@ -237,6 +237,17 @@ func (r *runner) supervisorPresent() (bool, error) {
 	return service.SupervisorPresent(r.socket, filepath.Join(dir, "comms.db"), r.env.Getenv("HOME"))
 }
 
+func (r *runner) rememberSupervisor() error {
+	supervised, err := r.supervisorPresent()
+	if err != nil {
+		return err
+	}
+	if supervised {
+		return service.RememberSupervisor(r.socket)
+	}
+	return nil
+}
+
 func (r *runner) readinessEnded(ctx context.Context, logPath string) error {
 	if r.env.Context != nil && r.env.Context.Err() != nil {
 		err := r.env.Context.Err()
@@ -247,6 +258,11 @@ func (r *runner) readinessEnded(ctx context.Context, logPath string) error {
 
 func (r *runner) ensureReady(client *httpapi.Client) error {
 	ctx := r.readyContext()
+	// Remember installation intent while the old owner is still running, before
+	// automatic upgrade shutdown or launchd can remove either socket or plist.
+	if err := r.rememberSupervisor(); err != nil {
+		return err
+	}
 	for attempt := 0; ; attempt++ {
 		hs, err := handshake(ctx, client)
 		if err == nil {
@@ -301,6 +317,9 @@ func (r *runner) reconcile(ctx context.Context, client *httpapi.Client) error {
 }
 
 func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, logPath string) error {
+	if err := r.rememberSupervisor(); err != nil {
+		return err
+	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return r.readinessEnded(ctx, logPath)

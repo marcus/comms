@@ -38,7 +38,7 @@ func InstalledSupervisor(socket, database, home string) (bool, error) {
 			continue
 		}
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("%w: cannot inspect installed supervisor: %w", app.ErrUnavailable, err)
 		}
 		var root launchdValue
 		if err = xml.Unmarshal(data, &root); err != nil || len(root.Children) != 1 || root.Children[0].XMLName.Local != "dict" {

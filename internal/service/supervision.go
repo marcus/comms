@@ -18,7 +18,7 @@ func SupervisedSocket(socket string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("%w: cannot inspect supervisor ownership: %w", app.ErrUnavailable, err)
 	}
 	if string(data) != supervisedMarker {
 		return false, fmt.Errorf("%w: invalid supervised-service marker", app.ErrConflict)
@@ -57,6 +57,9 @@ func rememberSupervision(cfg Config) error {
 // RememberSupervisor records intent before database ownership, including when
 // the supervisor loses a race or fails to open the store.
 func RememberSupervisor(socket string) error {
+	if marked, err := SupervisedSocket(socket); err == nil && marked {
+		return nil
+	}
 	path := socket + ".supervised"
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
