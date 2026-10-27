@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.9.1] - 2026-10-27
 
 - Add fixed-participant group DMs with `send @alice @bob ...` and additive API `agents` arrays. Conversations of three to 32 participants reuse the same topic for a sorted stable-ID set; existing two-party DMs retain their keys, kind and response fields. Expose `group` kind, participant details and `topics --include-direct` discovery for members.
 - Keep conversation membership fixed, reject duplicate/self/retired recipients atomically, and archive groups when a participant retires. Renames preserve membership; reused handles create new IDs and conversations. Document trusted-local routing and operator visibility across history, search, receipts, export and the existing global observe/head/wait continuation model.
