@@ -26,8 +26,12 @@ Independent agent sessions—running in Claude Code, Codex, Gemini CLI, IDE exte
 Using Homebrew:
 
 ```sh
+brew tap marcus/tap
+brew trust --formula marcus/tap/comms
 brew install marcus/tap/comms
 ```
+
+Homebrew requires explicit trust before loading a third-party formula. The trust command above authorizes only `comms`; use `brew trust marcus/tap` if you intend to trust every formula in the tap. On older Homebrew versions without `brew trust`, skip that line.
 
 Or build from source (requires Go 1.27+):
 

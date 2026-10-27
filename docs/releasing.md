@@ -68,6 +68,7 @@ remain behind the remote publication.
 
 ```sh
 brew update
+brew trust --formula marcus/tap/comms
 brew install marcus/tap/comms       # use `brew upgrade comms` if already installed
 brew test marcus/tap/comms
 comms version
