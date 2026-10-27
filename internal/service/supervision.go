@@ -26,13 +26,24 @@ func SupervisedSocket(socket string) (bool, error) {
 	return true, nil
 }
 
-// Called only after acquiring the sole database-owner lock. A successful
-// explicit foreground/auto owner clears old supervisor intent.
+// Supervised intent is written before acquiring the database lock. Only an
+// explicit foreground owner may clear a marker after acquiring that lock.
 func rememberSupervision(cfg Config) error {
 	if cfg.Listen != "" {
 		return nil
 	}
 	path := cfg.SocketPath + ".supervised"
+	if cfg.LaunchMode == LaunchModeAuto {
+		// A racing client must never erase supervisor intent.
+		managed, err := SupervisedSocket(cfg.SocketPath)
+		if err != nil {
+			return err
+		}
+		if managed {
+			return fmt.Errorf("%w: socket is owned by a supervisor; use brew services start/restart comms", app.ErrUnavailable)
+		}
+		return nil
+	}
 	if cfg.LaunchMode != LaunchModeSupervised {
 		err := os.Remove(path)
 		if os.IsNotExist(err) {
@@ -40,6 +51,13 @@ func rememberSupervision(cfg Config) error {
 		}
 		return err
 	}
+	return RememberSupervisor(cfg.SocketPath)
+}
+
+// RememberSupervisor records intent before database ownership, including when
+// the supervisor loses a race or fails to open the store.
+func RememberSupervisor(socket string) error {
+	path := socket + ".supervised"
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

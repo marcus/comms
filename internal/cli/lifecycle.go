@@ -229,6 +229,14 @@ func (a replaceAction) String() string {
 
 func readyHandshake(hs help.Handshake) bool { return hs.Readiness == "" || hs.Readiness == "ready" }
 
+func (r *runner) supervisorPresent() (bool, error) {
+	dir, err := r.stateDir()
+	if err != nil {
+		return false, err
+	}
+	return service.SupervisorPresent(r.socket, filepath.Join(dir, "comms.db"), r.env.Getenv("HOME"))
+}
+
 func (r *runner) readinessEnded(ctx context.Context, logPath string) error {
 	if r.env.Context != nil && r.env.Context.Err() != nil {
 		err := r.env.Context.Err()
@@ -270,7 +278,7 @@ func (r *runner) ensureReady(client *httpapi.Client) error {
 			return err
 		}
 		if r.policy != policyRestart && !autoStartEnabled(r.g.noAutoStart, r.env.Getenv) {
-			supervised, markerErr := service.SupervisedSocket(r.socket)
+			supervised, markerErr := r.supervisorPresent()
 			if markerErr != nil {
 				return markerErr
 			}
@@ -336,7 +344,7 @@ func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, lo
 		if !transientReadinessError(err) {
 			return err
 		}
-		supervised, markerErr := service.SupervisedSocket(r.socket)
+		supervised, markerErr := r.supervisorPresent()
 		if markerErr != nil {
 			return markerErr
 		}
@@ -345,6 +353,11 @@ func (r *runner) reconcileLocked(ctx context.Context, client *httpapi.Client, lo
 			return lockErr
 		}
 		if supervised || !released {
+			if supervised {
+				if err := service.RememberSupervisor(r.socket); err != nil {
+					return err
+				}
+			}
 			if err = waitBackoff(ctx, attempt); err != nil {
 				return r.readinessEnded(ctx, logPath)
 			}
@@ -586,7 +599,7 @@ func (r *runner) waitUntilReady(ctx context.Context, client *httpapi.Client, han
 			childErr := handle.Err()
 			var exit *exec.ExitError
 			transient := errors.Is(childErr, app.ErrUnavailable) || (errors.As(childErr, &exit) && exit.ExitCode() == 5)
-			supervised, markerErr := service.SupervisedSocket(r.socket)
+			supervised, markerErr := r.supervisorPresent()
 			if markerErr != nil {
 				return markerErr
 			}
@@ -728,16 +741,18 @@ func (r *runner) serverLogPath() string {
 }
 
 type statusReport struct {
-	Readiness        string    `json:"readiness,omitempty"`
-	Running          bool      `json:"running"`
-	ServerInstanceID string    `json:"server_instance_id,omitempty"`
-	PID              int       `json:"pid,omitempty"`
-	StartedAt        time.Time `json:"started_at,omitempty"`
-	LaunchMode       string    `json:"launch_mode,omitempty"`
-	Version          string    `json:"version,omitempty"`
-	Commit           string    `json:"commit,omitempty"`
-	SocketPath       string    `json:"socket_path,omitempty"`
-	DatabasePath     string    `json:"database_path,omitempty"`
+	SupervisorPresent bool      `json:"supervisor_present"`
+	OwnershipConflict bool      `json:"ownership_conflict"`
+	Readiness         string    `json:"readiness,omitempty"`
+	Running           bool      `json:"running"`
+	ServerInstanceID  string    `json:"server_instance_id,omitempty"`
+	PID               int       `json:"pid,omitempty"`
+	StartedAt         time.Time `json:"started_at,omitempty"`
+	LaunchMode        string    `json:"launch_mode,omitempty"`
+	Version           string    `json:"version,omitempty"`
+	Commit            string    `json:"commit,omitempty"`
+	SocketPath        string    `json:"socket_path,omitempty"`
+	DatabasePath      string    `json:"database_path,omitempty"`
 }
 
 func statusFromHandshake(hs help.Handshake, fallbackSocket string) statusReport {
@@ -769,16 +784,23 @@ func (r *runner) inspectStatus() (statusReport, error) {
 	}
 	client := r.newClient(socket, "")
 	hs, err := handshake(r.commandContext(), client)
+	supervised, supervisorErr := r.supervisorPresent()
+	if supervisorErr != nil {
+		return statusReport{}, supervisorErr
+	}
 	if err != nil {
 		if httpapi.IsAutoStartableDial(err) {
-			return statusReport{Running: false, SocketPath: socket}, nil
+			return statusReport{Running: false, SocketPath: socket, SupervisorPresent: supervised}, nil
 		}
 		return statusReport{}, err
 	}
 	if err := checkHandshakeCompatibility(hs); err != nil {
 		return statusReport{}, err
 	}
-	return statusFromHandshake(hs, socket), nil
+	report := statusFromHandshake(hs, socket)
+	report.SupervisorPresent = supervised
+	report.OwnershipConflict = supervised && hs.LaunchMode != string(service.LaunchModeSupervised)
+	return report, nil
 }
 
 func (r *runner) liveStatus(client *httpapi.Client) (statusReport, error) {
@@ -799,6 +821,10 @@ func (r *runner) liveStatus(client *httpapi.Client) (statusReport, error) {
 func (r *runner) printStatus(report statusReport) error {
 	if r.g.json {
 		return r.output(report)
+	}
+	if report.OwnershipConflict {
+		_, err := fmt.Fprintln(r.env.Stdout, "supervisor present but an unsupervised daemon owns the store; run comms stop, then brew services restart comms")
+		return err
 	}
 	if !report.Running {
 		_, err := fmt.Fprintln(r.env.Stdout, "comms is not running")
@@ -842,6 +868,14 @@ func (r *runner) stopService(client *httpapi.Client) (didStop bool, err error) {
 		return false, startupFailure("lock", logPath, err)
 	}
 	defer func() { _ = lock.Close() }()
+	// Protect even older retrying clients before opening the stop/restart gap.
+	if supervised, inspectErr := r.supervisorPresent(); inspectErr != nil {
+		return false, inspectErr
+	} else if supervised {
+		if err := service.RememberSupervisor(r.socket); err != nil {
+			return false, err
+		}
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {

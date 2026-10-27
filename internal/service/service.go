@@ -63,14 +63,29 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if err = refuseInstalledSupervisor(cfg); err != nil {
+		return err
+	}
+	if cfg.LaunchMode != LaunchModeForeground {
+		if err = rememberSupervision(cfg); err != nil {
+			return err
+		}
+	}
 
 	adapter, err := store.Open(ctx, store.Options{Path: cfg.DatabasePath, ReadConnections: cfg.ReadPoolSize, QueueDepth: cfg.WriterQueue})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = adapter.Close() }()
-	if err = rememberSupervision(cfg); err != nil {
-		return err
+	// Recheck after acquiring ownership: a supervisor may have declared intent
+	// while an already-spawned auto child was opening the store.
+	if cfg.LaunchMode != LaunchModeSupervised {
+		if err = refuseInstalledSupervisor(cfg); err != nil {
+			return err
+		}
+		if err = rememberSupervision(cfg); err != nil {
+			return err
+		}
 	}
 
 	application := app.NewService(adapter, domain.UTCClock{})
@@ -129,6 +144,27 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	serveErr := <-serveResult
 	return errors.Join(shutdownErr, serveErr)
+}
+
+func refuseInstalledSupervisor(cfg Config) error {
+	if cfg.Listen != "" || cfg.LaunchMode == LaunchModeSupervised {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	installed, err := InstalledSupervisor(cfg.SocketPath, cfg.DatabasePath, home)
+	if err != nil {
+		return err
+	}
+	if !installed {
+		return nil
+	}
+	if err = RememberSupervisor(cfg.SocketPath); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: an installed supervisor owns this service; use brew services start/restart comms", app.ErrUnavailable)
 }
 
 func resolveConfig(cfg Config) (Config, error) {

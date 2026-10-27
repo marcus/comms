@@ -87,6 +87,27 @@ git -C "$(brew --repository marcus/tap)" show origin/main:Formula/comms.rb
 The release is complete only after the public binary and Homebrew test report
 the requested version and a clean-store black-box CLI conversation succeeds.
 
+## Upgrade the live daemon
+
+Installing a new CLI does not replace an already running daemon. For every release, inspect `comms --json status` after upgrading Homebrew and compare the daemon version with `comms --version`. If the schema or protocol changes, back up the live database before any command that can auto-upgrade it:
+
+```sh
+backup="$HOME/.local/state/comms/comms-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).db"
+sqlite3 "$HOME/.local/state/comms/comms.db" ".backup '$backup'"
+sqlite3 "$backup" 'PRAGMA quick_check;'
+```
+
+Use the reported database path for a custom store. Retain the backup for rollback; do not copy a live WAL database with `cp`. Status may refuse an older schema, so use the pre-upgrade status or inspect-only `hello` to identify the owner.
+
+Restart the installed service using its owner: `comms restart` for an unsupervised `comms serve --daemon-child`, `brew services restart marcus/tap/comms` for Homebrew supervision, or stop and relaunch an explicit foreground process. Keep retrying clients away from the upgrade until the backup is complete. Then verify the live daemon, not only the client:
+
+```sh
+comms --json status       # version must match the release, readiness must be ready
+comms observe --limit 1   # must succeed against the live store
+```
+
+Record the backup path, restart command and both verification results in the release handoff. A release is not complete while the installed client is incompatible with the running daemon. Do not restart the default tmux server.
+
 ## First lifecycle-aware upgrade
 
 v1.0.0 has no shutdown operation and no process incarnation. After installing a
