@@ -71,7 +71,7 @@ brew update
 brew trust --formula marcus/tap/comms
 brew install marcus/tap/comms       # use `brew upgrade comms` if already installed
 brew test marcus/tap/comms
-comms version
+comms --version
 ```
 
 Also inspect the immutable release evidence:
