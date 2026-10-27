@@ -190,17 +190,20 @@ wait_for_public_release() {
 validate_formula() {
   local formula=$1 release_version=$2 expected_sha=$3
   local validation_tap="comms-release/validation-$$-$RANDOM"
+  local needs_trust=false
+  if brew help trust >/dev/null 2>&1; then needs_trust=true; fi
 
   ruby -c "$formula" >/dev/null
   [[ $(formula_version "$formula") == "$release_version" ]] || die "formula version mismatch"
   [[ $(formula_sha256 "$formula") == "$expected_sha" ]] || die "formula checksum mismatch"
 
   (
-    trap 'brew untap --force "$validation_tap" >/dev/null 2>&1 || true' EXIT
+    trap 'if $needs_trust; then brew untrust --formula "$validation_tap/comms" >/dev/null 2>&1 || true; fi; brew untap --force "$validation_tap" >/dev/null 2>&1 || true' EXIT
     brew tap-new --no-git "$validation_tap" >/dev/null
     validation_repo=$(brew --repository "$validation_tap")
     mkdir -p "$validation_repo/Formula"
     cp "$formula" "$validation_repo/Formula/comms.rb"
+    if $needs_trust; then brew trust --formula "$validation_tap/comms"; fi
     brew style --formula "$validation_tap/comms"
     brew audit --strict --online --formula "$validation_tap/comms"
   )

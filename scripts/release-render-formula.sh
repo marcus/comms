@@ -66,7 +66,7 @@ class Comms < Formula
   end
 
   test do
-    assert_match "comms $version (homebrew)", shell_output("#{bin}/comms version")
+    assert_match "comms $version (homebrew)", shell_output("#{bin}/comms --version")
   end
 end
 EOF

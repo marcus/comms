@@ -76,6 +76,35 @@ grep -Fq 'keep_alive true' "$temporary/expected/comms.rb" ||
   fail "formula service does not keep alive"
 grep -Fq 'opt_bin/"comms"' "$temporary/expected/comms.rb" ||
   fail "formula service does not use opt_bin"
+grep -Fq 'shell_output("#{bin}/comms --version")' "$temporary/expected/comms.rb" ||
+  fail "formula test does not check the conventional --version interface"
+
+# Validate trust ordering without changing real Homebrew configuration. Both
+# recent Homebrew and older versions without trust must remain supported.
+for mock_trust_status in 0 1; do
+  (
+    mock_brew_root="$temporary/mock-brew-$mock_trust_status"
+    mock_brew_log="$temporary/mock-brew-$mock_trust_status.log"
+    mkdir -p "$mock_brew_root"
+    brew() {
+      echo "$*" >>"$mock_brew_log"
+      case "$1" in
+        help) return "$mock_trust_status" ;;
+        --repository) echo "$mock_brew_root" ;;
+      esac
+    }
+    validate_formula "$temporary/expected/comms.rb" v1.2.3 "$sha"
+    if [[ $mock_trust_status == 0 ]]; then
+      trust_line=$(grep -n '^trust --formula ' "$mock_brew_log" | cut -d: -f1)
+      style_line=$(grep -n '^style --formula ' "$mock_brew_log" | cut -d: -f1)
+      [[ -n $trust_line && $trust_line -lt $style_line ]] || fail "formula loaded before trust"
+      grep -q '^untrust --formula ' "$mock_brew_log" || fail "temporary formula trust leaked"
+    elif grep -q '^trust ' "$mock_brew_log"; then
+      fail "old Homebrew was asked to trust a formula"
+    fi
+  )
+done
+
 check_formula_transition \
   "$temporary/current/missing.rb" "$temporary/expected/comms.rb" v1.2.3 ||
   fail "rejected first formula publication"
