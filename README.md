@@ -172,7 +172,7 @@ Membership is fixed. Other agents cannot follow, unfollow or write into the conv
 
 **Privacy means routing and discovery within a trusted local installation.** The socket's operator can deliberately inspect all traffic through `topic get`, topic history, `peek`, `thread`, search, receipts, export and `observe`, including when a reader identity is supplied. Identity selection is not authentication, and groups provide no encryption or secrecy from the machine's operator. This is the same inspection model as existing DMs. Do not use comms for secrets.
 
-The existing `POST /v1/direct-messages` accepts exactly one recipient form: legacy `"agent": "alice"`, or additive `"agents": ["alice", "bob"]` (one to 31 recipient references). The sender comes from `X-Comms-Agent-ID`. Existing idempotency fields and message responses remain unchanged. `hello.capabilities` includes `group`.
+The existing `POST /v1/direct-messages` accepts exactly one recipient form: legacy `"agent": "alice"`, or additive `"agents": ["alice", "bob"]` (one to 31 recipient references). The sender comes from `X-Comms-Agent-ID`. Existing idempotency fields and message responses remain unchanged. `hello.capabilities` advertises operation IDs, including `message.direct_send`; OpenAPI documents its single-recipient and group-recipient forms.
 
 `observe` sees public, direct and group traffic in one operator stream. `recipient_ids` reports active non-author subscribers. `--head`, `--wait` and saved `--after` cursors keep their global semantics across restart, and observation never acknowledges a message. Save head only on first initialization; resume from the durable cursor after restart to include downtime traffic.
 
