@@ -116,7 +116,7 @@ func startupFailure(phase, logPath string, err error) error {
 
 func commandPolicyOf(command string) commandPolicy {
 	switch command {
-	case "help", "-h", "--help", "version", "openapi", "capabilities", "instructions", "serve":
+	case "help", "-h", "--help", "version", "--version", "-v", "-V", "openapi", "capabilities", "instructions", "serve":
 		return policyProcessLocal
 	case "hello", "health", "doctor", "status", "stop":
 		return policyInspectOnly

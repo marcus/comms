@@ -141,7 +141,7 @@ func (r *runner) run(args []string) error {
 	case "help", "-h", "--help":
 		_, _ = io.WriteString(r.env.Stdout, help.CLIUsage("comms"))
 		return nil
-	case "version":
+	case "version", "--version", "-v", "-V":
 		if len(args) != 1 {
 			return usage("version accepts no arguments")
 		}
