@@ -29,7 +29,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 type Options struct {
 	Path            string
@@ -270,9 +270,9 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration, now int64) (er
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	// Rebuild the referenced agents table without rewriting child references.
+	// Rebuild referenced agents/topics tables without rewriting child references.
 	// Foreign keys are restored on this same connection after commit/rollback.
-	if m.version == 4 {
+	if m.version == 4 || m.version == 5 {
 		if _, err = conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
 			return err
 		}
@@ -289,7 +289,7 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration, now int64) (er
 	if _, err = tx.ExecContext(ctx, m.body); err != nil {
 		return fmt.Errorf("migration %d: %w", m.version, err)
 	}
-	if m.version == 4 {
+	if m.version == 4 || m.version == 5 {
 		rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
 		if err != nil {
 			return err
@@ -392,7 +392,7 @@ func (a *Adapter) Close() (storageErr error) {
 
 func (a *Adapter) Handshake(context.Context) (_ app.Handshake, storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
-	return app.Handshake{StoreID: a.storeID, ProtocolVersion: app.ProtocolVersion, SchemaVersion: schemaVersion, Capabilities: []string{"agents", "topics", "subscriptions", "messages", "direct", "threads", "receipts", "search", "retention", "observe", "export"}}, nil
+	return app.Handshake{StoreID: a.storeID, ProtocolVersion: app.ProtocolVersion, SchemaVersion: schemaVersion, Capabilities: []string{"agents", "topics", "subscriptions", "messages", "direct", "group", "threads", "receipts", "search", "retention", "observe", "export"}}, nil
 }
 
 func micros(t time.Time) int64   { return t.UTC().UnixMicro() }

@@ -134,6 +134,10 @@ func openAPIOperation(operation Operation) map[string]any {
 			properties["request_id"] = map[string]any{"type": "string", "description": "Client-chosen idempotency key; must accompany client_id."}
 		}
 		schema := map[string]any{"type": "object", "additionalProperties": false, "properties": properties}
+		if operation.ID == "message.direct_send" {
+			schema["oneOf"] = []any{map[string]any{"required": []string{"agent"}, "not": map[string]any{"required": []string{"agents"}}}, map[string]any{"required": []string{"agents"}, "not": map[string]any{"required": []string{"agent"}}}}
+			properties["agent"].(map[string]any)["minLength"] = 1
+		}
 		if len(required) != 0 {
 			schema["required"] = required
 		}
@@ -263,6 +267,9 @@ func schemaFromType(t reflect.Type, active map[reflect.Type]bool) map[string]any
 	if t == rawMessageType {
 		return map[string]any{"type": "object", "additionalProperties": true}
 	}
+	if t == reflect.TypeOf(domain.TopicKind("")) {
+		return map[string]any{"type": "string", "enum": []string{"public", "direct", "group"}}
+	}
 	switch t.Kind() {
 	case reflect.String:
 		return map[string]any{"type": "string"}
@@ -333,6 +340,11 @@ func schemaFromType(t reflect.Type, active map[reflect.Type]bool) map[string]any
 
 func openAPISchema(parameter Parameter) map[string]any {
 	schema := map[string]any{"type": parameter.Type}
+	if parameter.Type == "array" {
+		schema["items"] = map[string]any{"type": "string", "minLength": 1}
+		schema["minItems"] = 1
+		schema["maxItems"] = app.MaxConversationParticipants - 1
+	}
 	if parameter.Name == "title" && parameter.Location == BodyParameter && !parameter.Required {
 		schema["type"] = []string{"string", "null"}
 	}

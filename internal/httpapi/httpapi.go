@@ -459,7 +459,7 @@ func (h *Handler) subscriptions(w http.ResponseWriter, r *http.Request) {
 type messageWire struct {
 	app.Mutation
 	Topic        string          `json:"topic,omitempty"`
-	Agent        string          `json:"agent,omitempty"`
+	Agent        json.RawMessage `json:"agent,omitempty"`
 	Kind         string          `json:"kind,omitempty"`
 	Title        string          `json:"title,omitempty"`
 	Body         string          `json:"body"`
@@ -467,6 +467,25 @@ type messageWire struct {
 	ExpiresIn    string          `json:"expires_in,omitempty"`
 	NeverExpires bool            `json:"never_expires,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	Agents       json.RawMessage `json:"agents,omitempty"`
+}
+
+func (m messageWire) recipients() (string, []string, error) {
+	if (m.Agent == nil) == (m.Agents == nil) {
+		return "", nil, fmt.Errorf("%w: supply exactly one of agent or agents", domain.ErrInvalid)
+	}
+	if m.Agent != nil {
+		var agent string
+		if err := json.Unmarshal(m.Agent, &agent); err != nil || strings.TrimSpace(agent) == "" {
+			return "", nil, fmt.Errorf("%w: agent must be a nonempty string", domain.ErrInvalid)
+		}
+		return agent, nil, nil
+	}
+	var agents []string
+	if err := json.Unmarshal(m.Agents, &agents); err != nil || len(agents) == 0 {
+		return "", nil, fmt.Errorf("%w: agents must be a nonempty array of strings", domain.ErrInvalid)
+	}
+	return "", agents, nil
 }
 
 func (m messageWire) expiry() (app.Expiry, error) {
@@ -506,12 +525,17 @@ func (h *Handler) directSend(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &x) {
 		return
 	}
+	recipient, recipients, err := x.recipients()
+	if err != nil {
+		h.respond(w, nil, err)
+		return
+	}
 	exp, e := x.expiry()
 	if e != nil {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.DirectSend(r.Context(), app.DirectSendRequest{Mutation: x.Mutation, Author: author, Recipient: x.Agent, Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
+	v, e := h.app.DirectSend(r.Context(), app.DirectSendRequest{Mutation: x.Mutation, Author: author, Recipient: recipient, Recipients: recipients, Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
 	h.respond(w, v, e)
 }
 func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {

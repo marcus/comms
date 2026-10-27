@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	SchemaVersion   = 4
-	DefaultLimit    = 50
-	MaxLimit        = 500
+	ProtocolVersion             = 1
+	SchemaVersion               = 5
+	MaxConversationParticipants = 32
+	DefaultLimit                = 50
+	MaxLimit                    = 500
 	// InboxDefaultLimit keeps the attention surface small. The inbox is
 	// triaged, not read: an agent scans previews and peeks what it will act on.
 	InboxDefaultLimit = 20
@@ -214,13 +215,14 @@ type PublishRequest struct {
 }
 type DirectSendRequest struct {
 	Mutation
-	Author    string          `json:"author"`
-	Recipient string          `json:"recipient"`
-	Kind      string          `json:"kind,omitempty"`
-	Title     string          `json:"title"`
-	Body      string          `json:"body"`
-	Expiry    Expiry          `json:"expiry,omitempty"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Author     string          `json:"author"`
+	Recipient  string          `json:"recipient"`
+	Recipients []string        `json:"recipients,omitempty"`
+	Kind       string          `json:"kind,omitempty"`
+	Title      string          `json:"title"`
+	Body       string          `json:"body"`
+	Expiry     Expiry          `json:"expiry,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 type ReplyRequest struct {
 	Mutation
@@ -236,17 +238,18 @@ type ReplyRequest struct {
 // PreparedMessage is validated and fully identified by Service before an atomic store mutation.
 type PreparedMessage struct {
 	Mutation
-	ID        domain.MessageID
-	Author    string
-	Topic     string
-	Parent    string
-	Recipient string
-	Kind      string
-	Title     string
-	Body      string
-	ExpiresAt *time.Time
-	Metadata  json.RawMessage
-	Now       time.Time
+	ID         domain.MessageID
+	Author     string
+	Topic      string
+	Parent     string
+	Recipient  string
+	Recipients []string
+	Kind       string
+	Title      string
+	Body       string
+	ExpiresAt  *time.Time
+	Metadata   json.RawMessage
+	Now        time.Time
 }
 
 type MessageListRequest struct {
@@ -686,8 +689,8 @@ func (s *Service) EnsureTopic(ctx context.Context, req EnsureTopicRequest) (Ensu
 	if e := req.ExternalRef.Validate(); e != nil {
 		return EnsureTopicResponse{}, e
 	}
-	if req.ExternalRef.Namespace == "direct" {
-		return EnsureTopicResponse{}, fmt.Errorf("%w: external namespace direct is reserved", domain.ErrInvalid)
+	if req.ExternalRef.Namespace == "direct" || req.ExternalRef.Namespace == "group" {
+		return EnsureTopicResponse{}, fmt.Errorf("%w: external namespace %s is reserved", domain.ErrInvalid, req.ExternalRef.Namespace)
 	}
 	id, e := domain.NewTopicID()
 	if e != nil {
@@ -782,8 +785,29 @@ func (s *Service) DirectSend(ctx context.Context, req DirectSendRequest) (domain
 	if e := req.Validate(); e != nil {
 		return domain.Message{}, e
 	}
-	message, err := s.prepareAnd(ctx, req.Mutation, req.Author, "", "", req.Recipient, req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, s.messageStore.DirectSend)
-	if errors.Is(err, ErrNotFound) {
+	if (req.Recipient == "") == (req.Recipients == nil) {
+		return domain.Message{}, requiredErr("exactly one of recipient or recipients")
+	}
+	recipients := req.Recipients
+	if req.Recipient != "" {
+		recipients = []string{req.Recipient}
+	}
+	if len(recipients) == 0 {
+		return domain.Message{}, requiredErr("nonempty recipients")
+	}
+	if len(recipients) >= MaxConversationParticipants {
+		return domain.Message{}, fmt.Errorf("%w: conversations support at most %d participants including the sender", domain.ErrInvalid, MaxConversationParticipants)
+	}
+	for _, recipient := range recipients {
+		if strings.TrimSpace(recipient) == "" {
+			return domain.Message{}, requiredErr("nonempty recipient")
+		}
+	}
+	message, err := s.prepareAnd(ctx, req.Mutation, req.Author, "", "", recipients[0], req.Title, req.Body, req.Kind, req.Expiry, req.Metadata, func(ctx context.Context, p PreparedMessage) (domain.Message, error) {
+		p.Recipients = append([]string(nil), recipients...)
+		return s.messageStore.DirectSend(ctx, p)
+	})
+	if errors.Is(err, ErrNotFound) && req.Recipient != "" {
 		err = s.suggestRecipient(ctx, req.Recipient, err)
 	}
 	return message, err

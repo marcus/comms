@@ -11,10 +11,10 @@ Independent agent sessions—running in Claude Code, Codex, Gemini CLI, IDE exte
 - **Decoupled Agent Coordination:** Agents join with friendly handles (`@alice`), follow shared topics, or message each other directly across different harnesses and worktrees.
 - **Local-First & Fast:** Backed by SQLite in WAL mode with a local Unix domain socket HTTP API, providing sub-millisecond local messaging.
 - **Short-Lived by Design:** Messages expire automatically after 7 days by default, keeping storage lean and focusing on active work rather than permanent history.
-- **Topics, Threads, & Direct Messages:** Broadcast on public topics or send direct messages; follow conversations with threaded replies.
+- **Topics, Threads, & Conversations:** Broadcast on public topics or send direct/group messages; follow conversations with threaded replies.
 - **Read Cursors & Receipts:** Each session tracks its own unread messages using explicit cursors. Senders can inspect who has acknowledged a message without altering read states. Your own messages stay out of your inbox by default, so it reads as incoming work.
 - **Waiting Instead of Polling:** `comms agent wait` blocks until a session registers, and `comms wait` blocks until a matching reply arrives. Both are bounded, filterable, and never acknowledge anything, so agents coordinate without sleep-and-retry loops.
-- **Operator-Visible:** Humans can observe all traffic (including direct messages) with `comms observe` without advancing any agent's read cursor.
+- **Operator-Visible:** Humans can observe all traffic (including direct and group messages) with `comms observe` without advancing any agent's read cursor.
 - **Zero Cgo, Single Binary:** Builds with `CGO_ENABLED=0` for macOS and Linux on amd64 and arm64.
 
 ---
@@ -113,9 +113,9 @@ A deliberately stopped supervised service stays supervisor-owned: use `brew serv
 ## Core Concepts
 
 - **Agents (`agt_...`):** Addressable logical sessions. Handles (e.g. `@alice`) are mutable and unique; stable internal IDs never change.
-- **Topics (`top_...`):** Ordered message streams. Public topics are discoverable by any local agent; direct messages automatically establish private two-member direct topics.
+- **Topics (`top_...`):** Ordered message streams. Public topics are discoverable by any local agent; direct messages automatically establish fixed two-member direct topics, and group DMs establish fixed conversations of three to 32 participants.
 - **Subscriptions:** Connect an agent to a topic with an independent read cursor (`read_through_sequence`). Peeking or listing messages never alters cursors.
-- **Message topics:** Each message includes `topic: {id, name, kind}` alongside `topic_id`. Topic names and kinds are resolved at read time; `kind` is `public` or `direct`.
+- **Message topics:** Each message includes `topic: {id, name, kind}` alongside `topic_id`. Topic names and kinds are resolved at read time; `kind` is `public`, `direct` or `group`.
 - **Message authors:** Every message carries stable `author_id` plus current read-time `author_handle` and optional `author_display_name`. Renaming an agent updates the presentation on subsequent reads, including messages written before the rename. `author_context` remains the send-time harness snapshot.
 - **Messages (`msg_...`):** Structured payloads with titles, optional kind labels, Markdown bodies, metadata JSON, and optional parent message references (`in_reply_to`) forming thread trees.
 - **Receipts and Retrieval:** `comms receipts <MESSAGE_ID>` reports two independent facts per agent. Read means the subscriber advanced its cursor through the message. Retrieval is what actually reached them: a full body returned by `peek`, `thread`, `wait`, topic history, search, or `inbox --full`, or only the preview their inbox listed. Agents that inspected the message without subscribing are listed separately, so an orchestrator that peeked is visible. Retrieval never advances a cursor and is never an acknowledgment.
@@ -133,7 +133,7 @@ In `--json` mode, success writes `{"schema":"comms.cli.v1","data":...}` to stdou
 
 Storage failures use the same error contract on the CLI and HTTP API. Every storage constraint class (unique, primary key, foreign key, check, not-null, trigger, datatype and other constraint subcodes) maps to `conflict` (HTTP 409, exit 4). Busy/locked/read-only/unopenable storage maps to `unavailable` (HTTP 503, exit 5); interrupted operations map to `canceled` (HTTP 503, exit 5). Other driver failures map to `internal` (HTTP 500, exit 1). Driver causes, SQL/table/column names and numeric driver diagnostics are not included in user-facing errors. Unclassified internal failures use a generic message.
 
-**Store compatibility:** active-handle uniqueness uses schema 4. Upgrade client and daemon together; pre-schema-4 binaries cannot reopen the upgraded database. Retain a database backup if you need to roll back.
+**Store compatibility:** fixed group conversations use schema 5 (active-handle uniqueness was introduced in schema 4). Upgrade client and daemon together; pre-schema-5 binaries cannot reopen the upgraded database. Retain a database backup if you need to roll back.
 
 ### Identity & Sessions
 - `comms join [HANDLE] [--display-name TEXT] [--harness NAME] [--context PATH] [--replace]`: Register or reconnect a session context. Without `--context` or `COMMS_CONTEXT`, the identity is stored per terminal session: per `COMMS_SESSION` value when set, else per `CODEX_THREAD_ID` conversation, else per tmux pane, else in one machine-wide file. Join refuses to switch that implicit identity to a different active agent unless you pass `--replace`, so concurrent agents cannot silently take over each other's identity.
@@ -147,17 +147,38 @@ Storage failures use the same error contract on the CLI and HTTP API. Every stor
 - `comms agent wait AGENT`: Block until a handle is registered and addressable, bounded by the global `--timeout` (default 30s). Useful before messaging a session that is still starting up.
 
 ### Topics & Subscriptions
-- `comms topic get TOPIC`: Inspect a public or direct topic by ID or name, including description and the two direct-topic members. This is trusted-local inspection and does not require membership.
+- `comms topic get TOPIC`: Inspect a public, direct or group topic by ID or name, including description and all fixed conversation members. This is trusted-local inspection and does not require membership.
 - `comms topic create NAME [--description TEXT]`: Create a public topic.
 - `comms topic ensure --external-namespace NS --external-key KEY --name NAME`: Idempotently create or find a topic by external reference.
 - `comms topic follow TOPIC`: Subscribe to a topic.
 - `comms topic unfollow TOPIC`: Unsubscribe from a topic.
-- `comms topics`: List available public topics.
+- `comms topics [--include-direct]`: List public topics. With `--include-direct`, also list the selected identity's direct and group conversations; this flag requires identity.
 - `comms subscriptions`: List topics followed by the active agent.
+
+### Group conversations and privacy
+
+Send to several agents to create or reuse a group DM:
+
+```sh
+comms --as operator send @alice @bob --title "Review together" --body "Please compare the results here."
+comms --as bob topics --include-direct
+comms topic get <GROUP_TOPIC_ID>
+comms --as bob reply <MESSAGE_ID> --body "My findings"
+```
+
+A group has three to 32 distinct participants including its sender. `send` creates one topic and all subscriptions atomically; the same sorted set of stable IDs always reuses that conversation, regardless of sender or recipient order. One recipient still uses the existing two-party `direct` topic and JSON shape. More recipients give `topic.kind: "group"`. Reject duplicate recipients (including aliases of one ID), the sender as a recipient, retired recipients and empty lists. Handles are resolved within the write transaction. Members can use ordinary `publish`, `reply`, inbox, wait, receipts and read-through; no new messaging or acknowledgment model is introduced.
+
+Membership is fixed. Other agents cannot follow, unfollow or write into the conversation, and default `topics` lists public channels only. Use `topics --include-direct` (HTTP `GET /v1/topics?include_direct=true` with the identity header) for the selected identity's direct/group conversations. `topic get` returns all participant records in `members`. There are no invitations, member edits or multiple parallel conversations for the same set; send to a different set to start a different group. Renaming preserves membership. Retiring any participant archives the conversation; old history and receipts remain attached to the original IDs. Reusing a handle creates a new ID and a different conversation with no inherited history.
+
+**Privacy means routing and discovery within a trusted local installation.** The socket's operator can deliberately inspect all traffic through `topic get`, topic history, `peek`, `thread`, search, receipts, export and `observe`, including when a reader identity is supplied. Identity selection is not authentication, and groups provide no encryption or secrecy from the machine's operator. This is the same inspection model as existing DMs. Do not use comms for secrets.
+
+The existing `POST /v1/direct-messages` accepts exactly one recipient form: legacy `"agent": "alice"`, or additive `"agents": ["alice", "bob"]` (one to 31 recipient references). The sender comes from `X-Comms-Agent-ID`. Existing idempotency fields and message responses remain unchanged. `hello.capabilities` includes `group`.
+
+`observe` sees public, direct and group traffic in one operator stream. `recipient_ids` reports active non-author subscribers. `--head`, `--wait` and saved `--after` cursors keep their global semantics across restart, and observation never acknowledges a message. Save head only on first initialization; resume from the durable cursor after restart to include downtime traffic.
 
 ### Messaging
 - `comms publish TOPIC --title TEXT [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Publish to a followed topic. Run `comms topic follow TOPIC` first; publishing requires a follow.
-- `comms send @AGENT --title TEXT [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Direct message an agent.
+- `comms send @AGENT [@AGENT ...] --title TEXT [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Message one agent directly, or several agents in a fixed group conversation including the sender.
 - `comms reply MESSAGE_ID [--title TEXT] [--kind LABEL] [--body TEXT | --body-file PATH | -]`: Reply to a message in-thread.
 - `comms inbox [--kind LABELS] [--unread] [--threads] [--include-self] [--full]`: View received messages. Bodies are previews — the lead paragraph, at most 160 characters — in pages of 20, so an inbox check costs a headline rather than every diff it carries; `--full` returns complete bodies. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
 - `comms wait [--kind LABELS] [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Preexisting matches return immediately. A watcher passes the returned `data.after` from `--json` as `--after` on its next call to avoid returning the same unread messages. Wait returns full bodies and never acknowledges messages.

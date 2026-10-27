@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -86,17 +88,36 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (_ doma
 		if e != nil {
 			return domain.Message{}, e
 		}
-		recipient, e := resolveAgent(ctx, tx, p.Recipient, p.Now)
-		if e != nil {
-			return domain.Message{}, e
+		refs := p.Recipients
+		if len(refs) == 0 {
+			refs = []string{p.Recipient}
 		}
-		if author.ID == recipient.ID {
-			return domain.Message{}, fmt.Errorf("%w: direct recipient must be another agent", domain.ErrInvalid)
-		}
-		if author.RetiredAt != nil || recipient.RetiredAt != nil {
+		ids := []domain.AgentID{author.ID}
+		seen := map[domain.AgentID]bool{author.ID: true}
+		if author.RetiredAt != nil {
 			return domain.Message{}, fmt.Errorf("%w: direct participant is retired", app.ErrConflict)
 		}
-		ref := domain.DirectExternalRef(author.ID, recipient.ID)
+		for _, ref := range refs {
+			recipient, err := resolveAgent(ctx, tx, ref, p.Now)
+			if err != nil {
+				return domain.Message{}, err
+			}
+			if seen[recipient.ID] {
+				return domain.Message{}, fmt.Errorf("%w: recipient must be distinct from sender and other recipients", domain.ErrInvalid)
+			}
+			if recipient.RetiredAt != nil {
+				return domain.Message{}, fmt.Errorf("%w: direct participant is retired", app.ErrConflict)
+			}
+			seen[recipient.ID] = true
+			ids = append(ids, recipient.ID)
+		}
+		ref := domain.ConversationRef(ids)
+		kind, base := domain.TopicDirect, "direct:"+ref.Key
+		if len(ids) > 2 {
+			kind = domain.TopicGroup
+			base = fmt.Sprintf("group:%x", sha256.Sum256([]byte(ref.Key)))
+		}
+
 		var topicID string
 		e = tx.QueryRowContext(ctx, "SELECT topic_id FROM topic_external_refs WHERE namespace=? AND external_key=?", ref.Namespace, ref.Key).Scan(&topicID)
 		var topic domain.Topic
@@ -106,18 +127,18 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (_ doma
 			if e != nil {
 				return domain.Message{}, e
 			}
-			name, e := uniqueTopicName(ctx, tx, "direct:"+ref.Key)
+			name, e := uniqueTopicName(ctx, tx, base)
 			if e != nil {
 				return domain.Message{}, e
 			}
-			topic = domain.Topic{ID: id, Name: name, Kind: domain.TopicDirect, NextSequence: 1, CreatedAt: p.Now, UpdatedAt: p.Now}
+			topic = domain.Topic{ID: id, Name: name, Kind: kind, NextSequence: 1, CreatedAt: p.Now, UpdatedAt: p.Now}
 			if _, e = tx.ExecContext(ctx, "INSERT INTO topics("+topicInsertCols+") VALUES(?,?,?,?,?,1,?,?,NULL)", topic.ID, topic.Name, domain.TopicNameKey(topic.Name), topic.Kind, "", micros(p.Now), micros(p.Now)); e != nil {
 				return domain.Message{}, e
 			}
 			if _, e = tx.ExecContext(ctx, "INSERT INTO topic_external_refs(namespace,external_key,topic_id) VALUES(?,?,?)", ref.Namespace, ref.Key, topic.ID); e != nil {
 				return domain.Message{}, e
 			}
-			for _, id := range []domain.AgentID{author.ID, recipient.ID} {
+			for _, id := range ids {
 				if _, e = tx.ExecContext(ctx, "INSERT INTO subscriptions("+subscriptionCols+") VALUES(?,?,?,NULL,0,NULL,?)", id, topic.ID, micros(p.Now), micros(p.Now)); e != nil {
 					return domain.Message{}, e
 				}
@@ -129,16 +150,32 @@ func (a *Adapter) DirectSend(ctx context.Context, p app.PreparedMessage) (_ doma
 			if e != nil {
 				return domain.Message{}, e
 			}
-			if topic.ArchivedAt != nil || topic.Kind != domain.TopicDirect {
+			if topic.ArchivedAt != nil || topic.Kind != kind {
 				return domain.Message{}, fmt.Errorf("%w: direct topic is archived or inconsistent", app.ErrConflict)
 			}
-			var members, participants int
-			if e = tx.QueryRowContext(ctx, "SELECT count(*),COALESCE(sum(CASE WHEN agent_id IN (?,?) THEN 1 ELSE 0 END),0) FROM subscriptions WHERE topic_id=? AND unfollowed_at IS NULL", author.ID, recipient.ID, topic.ID).Scan(&members, &participants); e != nil {
-				return domain.Message{}, e
+			rows, err := tx.QueryContext(ctx, "SELECT agent_id FROM subscriptions WHERE topic_id=? AND unfollowed_at IS NULL ORDER BY agent_id", topic.ID)
+			if err != nil {
+				return domain.Message{}, err
 			}
-			if members != 2 || participants != 2 {
-				return domain.Message{}, fmt.Errorf("%w: direct topic membership is inconsistent", app.ErrConflict)
+			var members []domain.AgentID
+			for rows.Next() {
+				var id domain.AgentID
+				if err = rows.Scan(&id); err != nil {
+					_ = rows.Close()
+					return domain.Message{}, err
+				}
+				members = append(members, id)
 			}
+			err = rows.Err()
+			_ = rows.Close()
+			if err != nil {
+				return domain.Message{}, err
+			}
+			slices.Sort(ids)
+			if !slices.Equal(members, ids) {
+				return domain.Message{}, fmt.Errorf("%w: conversation membership is inconsistent", app.ErrConflict)
+			}
+
 		}
 		return insertMessage(ctx, tx, p, author, topic, nil)
 	})

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -106,10 +107,11 @@ type TopicKind string
 const (
 	TopicPublic TopicKind = "public"
 	TopicDirect TopicKind = "direct"
+	TopicGroup  TopicKind = "group"
 )
 
 func (k TopicKind) Validate() error {
-	if k != TopicPublic && k != TopicDirect {
+	if k != TopicPublic && k != TopicDirect && k != TopicGroup {
 		return fmt.Errorf("%w: unknown topic kind %q", ErrInvalid, k)
 	}
 	return nil
@@ -318,6 +320,20 @@ func DirectExternalRef(a, b AgentID) ExternalRef {
 		parts[0], parts[1] = parts[1], parts[0]
 	}
 	return ExternalRef{Namespace: "direct", Key: parts[0] + "." + parts[1]}
+}
+
+// ConversationRef is independent of participant ordering and mutable handles.
+// Stable IDs contain no dots, so the full sorted key is unambiguous.
+func ConversationRef(ids []AgentID) ExternalRef {
+	if len(ids) == 2 {
+		return DirectExternalRef(ids[0], ids[1])
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = string(id)
+	}
+	sort.Strings(parts)
+	return ExternalRef{Namespace: "group", Key: strings.Join(parts, ".")}
 }
 
 // TopicNameKey is the storage-independent Unicode case-folded topic identity.

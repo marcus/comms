@@ -22,7 +22,7 @@ Version 1 is one user and one machine. Cross-project communication is ordinary b
 1. **Name and language:** product, repository, module, and executable are `comms`; implementation is Go 1.27+ under `github.com/marcus/comms` and Apache-2.0.
 2. **Four-record public model:** agent, topic, subscription, and message. An agent is an addressable logical session endpoint, not a permanent persona or model identity. There are no recipient, delivery, actor-document, public-collection, or thread records in v1.
 3. **ActivityStreams-inspired, not ActivityStreams-native:** field semantics such as author, published time, content, and `in_reply_to` map cleanly later, but the store does not require JSON-LD, IRIs, actor documents, or `Create` activities.
-4. **Topics, not recipients:** a message belongs to one topic. Subscribers discover it through their topic cursor. Direct messages use an automatically managed two-member topic. `direct` controls routing and ordinary discovery, not confidentiality: direct topics do not appear in unrelated sessions' inboxes or normal topic listings, but any local client can deliberately inspect their messages through observation, search, or a known message or topic ID.
+4. **Topics, not recipients:** a message belongs to one topic. Subscribers discover it through their topic cursor. Direct messages use an automatically managed two-member topic; group DMs use a fixed three-to-32-member topic. `direct` controls routing and ordinary discovery, not confidentiality: direct topics do not appear in unrelated sessions' inboxes or normal topic listings, but any local client can deliberately inspect their messages through observation, search, or a known message or topic ID.
 5. **Friendly session labels over stable identity:** every record has an immutable opaque ID. Agent handles are mutable, case-insensitively unique labels for logical sessions; they are not usernames or security principals. Optional display names need not be unique. A session may reconnect using an integration-owned external reference and receive the same agent ID. Topic names are also mutable presentation.
 6. **SQLite authoritative state with one owner:** `comms serve` is the only process that opens the database. One writer goroutine and one write connection serialize mutations; a bounded query-only pool serves concurrent reads in WAL mode. Use `modernc.org/sqlite` so release builds remain `CGO_ENABLED=0`.
 7. **Diagnostic interchange, not durable backup:** deterministic, versioned JSONL export supports inspection, debugging, and one-off tooling. It is not a lossless restore contract, and v1 has no import operation. Losing Comms state may lose transient coordination but must not lose authoritative project or task data.
@@ -57,12 +57,12 @@ A topic is an ordered append-only stream:
 
 - `id`: `top_` plus the same random ID encoding;
 - `name`: mutable, case-insensitively unique, 1–128 characters;
-- `kind`: `public` or `direct`;
+- `kind`: `public`, `direct` or `group`;
 - `description`: optional, 2 KiB maximum;
 - `next_sequence`: next positive integer allocated inside the publish transaction;
 - `created_at`, `updated_at`, `archived_at`.
 
-Public topics are discoverable and followable by any local agent. Direct topics are omitted from ordinary topic discovery and unrelated sessions' inboxes, and have exactly two active subscriptions. This is routing and organization rather than a privacy boundary: any local client can deliberately read them, and operator observation sees them alongside public traffic.
+Public topics are discoverable and followable by any local agent. Direct and group topics are omitted from ordinary topic discovery and unrelated sessions' inboxes. Direct topics have exactly two fixed subscriptions; groups have three to 32. The selected identity can include its conversations with topics --include-direct (API include_direct=true). Topic details expose all members. This is routing and organization rather than a privacy boundary: any local client can deliberately read them, and operator observation sees them alongside public traffic.
 
 External references map a `(namespace, key)` pair to one topic. Both components are opaque strings to Comms and unique as a pair. The CLI renders them as `namespace:key` but API/storage fields remain separate so punctuation in integration-owned keys creates no parsing ambiguity.
 
@@ -76,7 +76,7 @@ A subscription joins one agent to one topic:
 - optional `read_through_at`, updated whenever the cursor advances;
 - `updated_at`.
 
-A new public-topic subscriber starts immediately before the earliest currently unexpired message, so the first inbox check includes available recent context but never already-expired history. If the topic has no live messages, it starts at the current tail. Unfollow preserves the cursor; refollow resumes it. Direct-topic subscriptions cannot be individually unfollowed; the direct topic is archived when either agent is retired or an explicit future close operation is added.
+A new public-topic subscriber starts immediately before the earliest currently unexpired message, so the first inbox check includes available recent context but never already-expired history. If the topic has no live messages, it starts at the current tail. Unfollow preserves the cursor; refollow resumes it. Direct/group subscriptions cannot be individually changed; the conversation is archived when any participant retires. Reused handles have fresh stable IDs and cannot inherit prior membership.
 
 The inbox is an attention surface rather than a complete log. It excludes messages authored by the reading agent by default, comparing resolved stable author identity rather than the mutable handle a message was written under, and `--include-self` / `include_self` restores them. Exclusion is a query projection applied inside the store before `LIMIT` and cursor construction, so pages stay complete and stable however self and incoming messages interleave; nothing is deleted, no cursor moves, and topic history, `thread`, `peek`, `search`, `receipts`, `observe`, and export always retain the reader's own messages. Thread summaries (`--threads`) collapse to the earliest still-visible message of each thread rather than to its structural root, so an incoming reply in a thread the reader started remains visible.
 
@@ -101,7 +101,7 @@ A message contains:
 
 `in_reply_to` must name a message in the same topic. Replies form a tree because several messages may share one parent. `thread_root_id` is stored for efficient thread queries but is not a separate domain entity.
 
-Direct send resolves the external reference `direct:<lexically sorted agent IDs joined with ".">`, ensures one direct topic and its two subscriptions, then performs an ordinary publish in the same transaction as first creation.
+Direct send resolves handles to stable IDs in the write transaction. With one recipient it retains the external reference `direct:<lexically sorted agent IDs joined with ".">` and the two-party topic. With two to 31 recipients it uses the same full canonical sorted-ID key in reserved namespace `group`, a bounded group topic name derived from its SHA-256, and kind `group`. Creation, all fixed subscriptions and the first publish are atomic. Duplicate/self/retired recipients are rejected. CLI send accepts several recipients before message flags; POST /v1/direct-messages accepts exactly one of legacy agent or additive agents array. Topic IDs, existing JSON fields and all old DM keys remain unchanged. Operator inspection and global observe --head/--wait/--after include groups without changing cursor semantics. Schema 5 adds the group kind while preserving child references and existing data; upgrade clients and daemon together.
 
 ## SQLite layout
 

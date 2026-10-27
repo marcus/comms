@@ -532,7 +532,7 @@ func (r *runner) listTopics(args []string) error {
 	if e != nil {
 		return e
 	}
-	return r.get("/v1/topics", q, false)
+	return r.get("/v1/topics", q, q.Get("include_direct") == "true")
 }
 func (r *runner) listSubscriptions(args []string) error {
 	q, e := listQuery("subscriptions", args, true)
@@ -716,20 +716,30 @@ func (r *runner) publish(args []string) error {
 	return r.mutate(http.MethodPost, "/v1/messages", content, true)
 }
 func (r *runner) send(args []string) error {
-	if len(args) == 0 {
-		return usage("send requires @AGENT")
+	var recipients []string
+	for len(args) > 0 && args[0] != "-" && !strings.HasPrefix(args[0], "-") {
+		recipient := strings.TrimPrefix(args[0], "@")
+		if recipient == "" {
+			return usage("send requires @AGENT [@AGENT ...]")
+		}
+		recipients = append(recipients, recipient)
+		args = args[1:]
 	}
-	recipient := strings.TrimPrefix(args[0], "@")
-	if recipient == "" {
-		return usage("send requires @AGENT")
+	if len(recipients) == 0 {
+		return usage("send requires @AGENT [@AGENT ...]")
 	}
-	content, e := r.messageContent("send", args[1:], true)
-	if e != nil {
-		return e
+	content, err := r.messageContent("send", args, true)
+	if err != nil {
+		return err
 	}
-	content["agent"] = recipient
+	if len(recipients) == 1 {
+		content["agent"] = recipients[0]
+	} else {
+		content["agents"] = recipients
+	}
 	return r.mutate(http.MethodPost, "/v1/direct-messages", content, true)
 }
+
 func (r *runner) reply(args []string) error {
 	if len(args) == 0 {
 		return usage("reply requires MESSAGE_ID")
@@ -1409,6 +1419,10 @@ func listQuery(name string, args []string, all bool) (url.Values, error) {
 	cursor := fs.String("cursor", "", "")
 	latest := fs.Bool("latest", false, "")
 	var includeAll *bool
+	var includeDirect *bool
+	if name == "topics" {
+		includeDirect = fs.Bool("include-direct", false, "")
+	}
 	if all {
 		includeAll = fs.Bool("all", false, "")
 	}
@@ -1419,6 +1433,9 @@ func listQuery(name string, args []string, all bool) (url.Values, error) {
 		return nil, usage("unexpected " + name + " arguments")
 	}
 	q := url.Values{}
+	if includeDirect != nil {
+		setBool(q, "include_direct", *includeDirect)
+	}
 	setInt(q, "limit", *limit)
 	set(q, "cursor", *cursor)
 	if *latest {

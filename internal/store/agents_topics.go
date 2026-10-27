@@ -159,7 +159,7 @@ func (a *Adapter) RetireAgent(ctx context.Context, req app.RetireAgentRequest, n
 			if _, e = tx.ExecContext(ctx, "UPDATE agents SET retired_at=?,updated_at=? WHERE id=?", micros(now), micros(now), ag.ID); e != nil {
 				return ag, e
 			}
-			if _, e = tx.ExecContext(ctx, "UPDATE topics SET archived_at=?,updated_at=? WHERE kind='direct' AND archived_at IS NULL AND id IN (SELECT topic_id FROM subscriptions WHERE agent_id=?)", micros(now), micros(now), ag.ID); e != nil {
+			if _, e = tx.ExecContext(ctx, "UPDATE topics SET archived_at=?,updated_at=? WHERE kind IN ('direct','group') AND archived_at IS NULL AND id IN (SELECT topic_id FROM subscriptions WHERE agent_id=?)", micros(now), micros(now), ag.ID); e != nil {
 				return ag, e
 			}
 		}
@@ -302,8 +302,8 @@ func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest,
 			return t, e
 		}
 		if t.ArchivedAt == nil {
-			if t.Kind == domain.TopicDirect {
-				return t, fmt.Errorf("%w: direct topics close only when a participant retires", app.ErrConflict)
+			if t.Kind != domain.TopicPublic {
+				return t, fmt.Errorf("%w: direct/group topics close only when a participant retires", app.ErrConflict)
 			}
 			t.ArchivedAt = &now
 			t.UpdatedAt = now
@@ -315,6 +315,13 @@ func (a *Adapter) ArchiveTopic(ctx context.Context, req app.ArchiveTopicRequest,
 
 func (a *Adapter) ListTopics(ctx context.Context, req app.TopicListRequest, agent string, now time.Time) (_ app.Page[domain.Topic], storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
+	if req.IncludeDirect && agent != "" {
+		selected, err := resolveAgent(ctx, a.read, agent, now)
+		if err != nil {
+			return app.Page[domain.Topic]{}, err
+		}
+		agent = string(selected.ID)
+	}
 	p, e := decodeCursor(req.Cursor, 2)
 	if e != nil {
 		return app.Page[domain.Topic]{}, e
@@ -372,8 +379,8 @@ func (a *Adapter) Follow(ctx context.Context, req app.FollowRequest, now time.Ti
 		if ag.RetiredAt != nil || t.ArchivedAt != nil {
 			return domain.Subscription{}, fmt.Errorf("%w: retired agent or archived topic", app.ErrConflict)
 		}
-		if t.Kind == domain.TopicDirect {
-			return domain.Subscription{}, fmt.Errorf("%w: direct subscriptions are managed atomically", app.ErrConflict)
+		if t.Kind != domain.TopicPublic {
+			return domain.Subscription{}, fmt.Errorf("%w: direct/group subscriptions are managed atomically", app.ErrConflict)
 		}
 		var existing domain.Subscription
 		existing, e = scanSubscription(tx.QueryRowContext(ctx, "SELECT "+subscriptionCols+" FROM subscriptions WHERE agent_id=? AND topic_id=?", ag.ID, t.ID))
@@ -413,8 +420,8 @@ func (a *Adapter) Unfollow(ctx context.Context, req app.UnfollowRequest, now tim
 		if e != nil {
 			return domain.Subscription{}, e
 		}
-		if t.Kind == domain.TopicDirect {
-			return domain.Subscription{}, fmt.Errorf("%w: direct topics cannot be unfollowed", app.ErrConflict)
+		if t.Kind != domain.TopicPublic {
+			return domain.Subscription{}, fmt.Errorf("%w: direct/group topics cannot be unfollowed", app.ErrConflict)
 		}
 		sub, e := scanSubscription(tx.QueryRowContext(ctx, "SELECT "+subscriptionCols+" FROM subscriptions WHERE agent_id=? AND topic_id=?", ag.ID, t.ID))
 		if errors.Is(e, sql.ErrNoRows) {
@@ -466,7 +473,7 @@ func (a *Adapter) ListSubscriptions(ctx context.Context, req app.SubscriptionLis
 	return out, nil
 }
 
-// GetTopic is trusted-local inspection, including direct topics and their two members.
+// GetTopic is trusted-local inspection, including direct/group topics and their fixed members.
 func (a *Adapter) GetTopic(ctx context.Context, ref string) (_ app.TopicDetails, storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
 	topic, err := resolveTopic(ctx, a.read, ref)
@@ -474,7 +481,7 @@ func (a *Adapter) GetTopic(ctx context.Context, ref string) (_ app.TopicDetails,
 		return app.TopicDetails{}, err
 	}
 	out := app.TopicDetails{Topic: topic}
-	if topic.Kind != domain.TopicDirect {
+	if topic.Kind == domain.TopicPublic {
 		return out, nil
 	}
 	rows, err := a.read.QueryContext(ctx, "SELECT "+prefixedAgentCols("a")+" FROM agents a JOIN subscriptions s ON s.agent_id=a.id WHERE s.topic_id=? ORDER BY a.id", topic.ID)
