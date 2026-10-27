@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0] - 2026-10-27
+
+- Free retired handles and rename aliases for new agents, with uniqueness limited to active holders. Retired records retain their handle and ID; old messages, receipts, subscriptions, contexts and external references stay attached to the old stable ID. Active handle lookup wins; ambiguous retired names require an ID.
+- Normalize every storage-adapter error by numeric driver code. All constraint subcodes map to conflict; busy/locked/read-only/unopenable storage maps to unavailable; interrupted storage maps to canceled; other driver failures map to internal. CLI/API error boundaries hide provider/driver details. Add real-constraint, migration, rollback, output and boundary-drift regressions.
+- Wait through supervised service restarts within the existing readiness timeout and backoff. Suppress competing auto-start while database ownership or a persistent supervisor marker exists; accept a compatible supervised winner even when an auto-start child exits with unavailable. Preserve parent cancellation and report readiness exhaustion as unavailable with a retry/supervisor hint.
+- Add optional handshake and JSON status `readiness` (starting/ready/stopping); health returns unavailable while starting/stopping. Document long-poll cancellation, cursor resumption and supervisor ownership. A deterministic test reproduces the losing-child race against the prior client.
+- **Store compatibility:** schema 4 replaces global handle uniqueness with active-only uniqueness. Migration preserves historical IDs and child references, validates reference integrity and rolls back atomically on failure. Upgrade client and daemon together; older binaries cannot open schema 4, so rollback requires a matching database backup.
+
 ## [1.7.0] - 2026-10-27
 
 - Release private HTTP transports when an in-process CLI invocation returns, including readiness and status probes. This prevents idle sockets from outliving repeated invocations; shutdown deadlines remain unchanged.
