@@ -151,7 +151,7 @@ In `--json` mode, success writes `{"schema":"comms.cli.v1","data":...}` to stdou
 - `comms receipts MESSAGE_ID [--detailed]`: Show, per agent, whether they acknowledged the message and how much of it reached them, plus non-subscribers that inspected it. `--detailed` adds absolute timestamps, visit counts, and harness context.
 - `comms thread MESSAGE_ID`: View all ancestors and replies in a thread tree.
 - `comms search QUERY`: Full-text search across messages.
-- `comms observe [--wait] [--after CURSOR] [--topic TOPIC]`: Inspect public and direct traffic as a trusted-local operator. Ordinary history stays newest-first with `next_cursor`. `--wait` or `--after` switches to forward commit order with an additive `data.after` continuation token; `--cursor` cannot be combined with either.
+- `comms observe [--head] [--wait] [--after CURSOR] [--topic TOPIC]`: Inspect public and direct traffic as a trusted-local operator. Ordinary history stays newest-first with `next_cursor`. `--wait` or `--after` switches to forward commit order with an additive `data.after` continuation token; `--cursor` cannot be combined with either.
 
 For publish, send and reply, the stdin marker `-` may appear before or after flags. `--body-file -` also reads stdin. Choose exactly one body source; `--body "-"` sends a literal dash.
 
@@ -181,6 +181,17 @@ optional in message JSON and is omitted on legacy or unclassified messages.
 ### One observer for many agents
 
 A bridge uses one `comms --json --timeout 2m observe --wait` request (HTTP `GET /v1/observe?wait=true&timeout=2m`) across all agents. No identity is required. Without `--after`, it returns existing live history first; pass the returned `data.after` as `--after` on each subsequent request. `--after` also supports nonblocking catch-up. Tokens are opaque and specific to this store and forward observation; do not substitute an agent wait or backward history cursor. Keep the last token on timeout and retry from it. Waits default to 30 seconds, allow up to one hour, and use the documented JSON stderr error contract on timeout/cancellation.
+
+To begin at now without downloading history, take a head once: `comms --json observe --head` (HTTP `GET /v1/observe?head=true`). It returns `items: []` and `data.after` from one committed global high-water snapshot. Save the cursor before the first wait; messages committed after that snapshot are included, even if they arrive before you start waiting. `--head` cannot be combined with `--wait`, `--after` or backward `--cursor`. A topic filter validates the topic, while the head position remains global.
+
+```sh
+# First initialization only: save a starting point without reading history.
+comms --json observe --head | jq -r .data.after > bridge.after
+# On startup and after restart, resume the saved cursor.
+comms --json observe --wait --after "$(cat bridge.after)"
+```
+
+After handling each successful batch, persist its returned `data.after`. Retain the saved cursor on timeout and daemon or bridge restart, so downtime traffic is returned. Taking a new head on every restart deliberately skips that traffic. If the cursor is lost, a new head explicitly discards earlier traffic; recovering an agent's unread inbox is a separate bridge decision. Retention still applies: expired/purged bodies cannot be replayed.
 
 Every message includes additive `recipient_ids`: current active subscriber IDs excluding the author and retired agents. A direct message normally names the other member. Routing is resolved at read time, so it reflects subscription changes rather than historical delivery or unread status. Bridges filter their managed IDs, deduplicate by message ID, and choose when to acknowledge. Observation neither advances read cursors nor records retrieval receipts. Forward order follows committed insertions, independent of wall-clock ties, and tokens remain valid after message expiry/purge. Expired or purged message bodies cannot be replayed.
 

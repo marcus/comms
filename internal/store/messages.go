@@ -658,6 +658,19 @@ func (a *Adapter) Observe(ctx context.Context, req app.ObserveRequest, now time.
 		}
 		topicID = string(topic.ID)
 	}
+	// One statement captures a committed boundary, including the persisted
+	// high-water mark when every retained message has expired or been purged.
+	// MAX(rowid) also covers stores written before ordinal metadata existed.
+	if req.Head {
+		var ordinal int64
+		err := a.read.QueryRowContext(ctx, "SELECT MAX(COALESCE((SELECT CAST(value AS INTEGER) FROM store_meta WHERE key='message_ordinal'),0), COALESCE((SELECT MAX(rowid) FROM messages),0))").Scan(&ordinal)
+		if err != nil {
+			return out, err
+		}
+		out.Items = []domain.Message{}
+		out.After = encodeCursor("observe", strconv.FormatInt(ordinal, 10))
+		return out, nil
+	}
 	if req.Wait || req.After != "" {
 		var ordinal int64
 		if req.After != "" {

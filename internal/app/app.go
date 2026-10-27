@@ -429,6 +429,7 @@ type SearchRequest struct {
 }
 type ObserveRequest struct {
 	PageRequest
+	Head    bool          `json:"head,omitempty"`
 	Topic   string        `json:"topic,omitempty"`
 	Wait    bool          `json:"wait,omitempty"`
 	After   string        `json:"after,omitempty"`
@@ -1112,6 +1113,9 @@ func (s *Service) Observe(ctx context.Context, req ObserveRequest) (ObserveRespo
 		return ObserveResponse{}, err
 	}
 	req.PageRequest = p
+	if req.Head && (req.Wait || req.After != "" || req.Cursor != "") {
+		return ObserveResponse{}, fmt.Errorf("%w: --head cannot be combined with --wait, --after or --cursor", domain.ErrInvalid)
+	}
 	if req.Cursor != "" && (req.Wait || req.After != "") {
 		return ObserveResponse{}, fmt.Errorf("%w: --cursor cannot be combined with --wait or --after", domain.ErrInvalid)
 	}

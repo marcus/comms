@@ -966,6 +966,7 @@ func (r *runner) search(args []string) error {
 }
 func (r *runner) observe(args []string) error {
 	fs := newFlagSet("observe")
+	head := fs.Bool("head", false, "")
 	wait := fs.Bool("wait", false, "")
 	after := fs.String("after", "", "")
 	topic := fs.String("topic", "", "")
@@ -978,10 +979,14 @@ func (r *runner) observe(args []string) error {
 	if fs.NArg() != 0 {
 		return usage("unexpected observe arguments")
 	}
+	if *head && (*wait || *after != "" || *cursor != "") {
+		return usage("--head cannot be combined with --wait, --after or --cursor")
+	}
 	if *cursor != "" && (*wait || *after != "") {
 		return usage("--cursor cannot be combined with --wait or --after")
 	}
 	q := url.Values{}
+	setBool(q, "head", *head)
 	setBool(q, "wait", *wait)
 	set(q, "after", *after)
 	set(q, "topic", *topic)

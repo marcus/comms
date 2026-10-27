@@ -646,7 +646,7 @@ func (h *Handler) observe(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Observe(r.Context(), app.ObserveRequest{PageRequest: p, Topic: r.URL.Query().Get("topic"), Wait: boolQuery(r, "wait"), After: r.URL.Query().Get("after"), Timeout: timeout})
+	v, e := h.app.Observe(r.Context(), app.ObserveRequest{PageRequest: p, Head: boolQuery(r, "head"), Topic: r.URL.Query().Get("topic"), Wait: boolQuery(r, "wait"), After: r.URL.Query().Get("after"), Timeout: timeout})
 	h.respond(w, v, e)
 }
 func (h *Handler) retention(w http.ResponseWriter, r *http.Request) {

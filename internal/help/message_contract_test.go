@@ -19,7 +19,7 @@ func TestBridgeAndMessageContractsAreDiscoverable(t *testing.T) {
 	if _, ok := paths["/v1/topics/{topic}"].(map[string]any)["get"]; !ok {
 		t.Fatal("missing topic lookup")
 	}
-	for _, token := range []string{`"author_handle"`, `"author_display_name"`, `"recipient_ids"`, `"members"`, `"after"`, `"wait"`, `"topic"`} {
+	for _, token := range []string{`"author_handle"`, `"author_display_name"`, `"recipient_ids"`, `"members"`, `"head"`, `"after"`, `"wait"`, `"topic"`} {
 		if !strings.Contains(string(data), token) {
 			t.Fatalf("missing schema field %s", token)
 		}
@@ -28,7 +28,7 @@ func TestBridgeAndMessageContractsAreDiscoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, token := range []string{"--wait", "--after", "--topic", "--timeout", "recipient_ids"} {
+	for _, token := range []string{"--head", "--wait", "--after", "--topic", "--timeout", "recipient_ids"} {
 		if !strings.Contains(helpText, token) {
 			t.Fatalf("missing help %s", token)
 		}
