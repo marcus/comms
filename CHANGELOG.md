@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.9.0] - 2026-10-27
+
+- Add fixed-participant group DMs with `send @alice @bob ...` and additive API `agents` arrays. Conversations of three to 32 participants reuse the same topic for a sorted stable-ID set; existing two-party DMs retain their keys, kind and response fields. Expose `group` kind, participant details and `topics --include-direct` discovery for members.
+- Keep conversation membership fixed, reject duplicate/self/retired recipients atomically, and archive groups when a participant retires. Renames preserve membership; reused handles create new IDs and conversations. Document trusted-local routing and operator visibility across history, search, receipts, export and the existing global observe/head/wait continuation model.
+- Detect matching installed Homebrew launchd jobs before their first successful launch. Persist supervisor intent across stop/restart, missing job-file windows and failed launches; auto children refuse that intent and never clear it. Recheck ownership after opening the store. Preserve existing readiness timeouts and backoff.
+- Add JSON status `supervisor_present` and `ownership_conflict`, plus a human recovery hint for old unsupervised owners. Add a live-daemon release checklist requiring a SQLite backup before schema/protocol upgrades, an owner-appropriate restart and live version/observation verification.
+- Add a deterministic retry-before-launchd regression that reproduces the v1.8.0 losing-supervisor race, plus group routing, visibility, CLI/API parity, input contract, migration/rollback, retirement and observation tests.
+- **Store compatibility:** schema 5 adds the group topic kind by rebuilding the topics table atomically while preserving IDs, child references, messages and cursors. Upgrade the client and running daemon together. Older binaries cannot open schema 5; rollback requires a pre-upgrade database backup.
+
 ## [1.8.0] - 2026-10-27
 
 - Free retired handles and rename aliases for new agents, with uniqueness limited to active holders. Retired records retain their handle and ID; old messages, receipts, subscriptions, contexts and external references stay attached to the old stable ID. Active handle lookup wins; ambiguous retired names require an ID.
