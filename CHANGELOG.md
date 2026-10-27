@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0] - 2026-10-27
+
+- Add `observe --head` and `GET /v1/observe?head=true` to capture a current committed starting cursor without downloading history. The response retains `items` and `after`; a head is an empty batch. Capture it once, persist the cursor before waiting, and reuse the saved cursor after restarts to include downtime traffic. Taking a new head explicitly skips prior traffic.
+- Keep head snapshots read-only, global and compatible with existing forward cursors, including empty stores, older stores without ordinal metadata and purged history. Reject combining head with wait, after or backward cursor.
+- Publish a complete environment reference in the README, general help, serve help and text/JSON/API instructions, with defaults and precedence for state, socket and identity selection. The actual variable is `COMMS_SOCKET`; `COMMS_SOCKETS` is not read. Include build/release inputs and a tested isolated-service recipe that overrides inherited selectors.
+- Guard environment documentation against drift by scanning application reads, Make inputs and release-script inputs, and requiring the README and installed reference to match.
+
 ## [1.6.1] - 2026-10-27
 
 - Remove the temporary Homebrew validation tap before revoking its formula trust. Homebrew inspects formulae during untap, so the reverse order leaves the temporary tap behind when `comms` is installed.
