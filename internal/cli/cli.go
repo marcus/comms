@@ -58,8 +58,9 @@ type globals struct {
 	noAutoStart bool
 }
 type runner struct {
-	env Env
-	g   globals
+	clients []*httpapi.Client
+	env     Env
+	g       globals
 	// requestTimeout overrides the global --timeout for the request itself.
 	// Waiting commands set it so their transport deadline outlives the
 	// service-side wait deadline without also extending daemon startup.
@@ -99,6 +100,9 @@ func Run(env Env) int {
 		}
 		if r.readyCancel != nil {
 			r.readyCancel()
+		}
+		for _, client := range r.clients {
+			client.CloseIdleConnections()
 		}
 	}()
 	if g.help {
@@ -1091,6 +1095,15 @@ func (r *runner) client(required bool) (*httpapi.Client, error) {
 	_, client, e := r.clientWithIdentity(required)
 	return client, e
 }
+
+// Every invocation owns its transports, including readiness/status probes.
+// In-process callers must not retain sockets after Run returns.
+func (r *runner) newClient(socket, agent string) *httpapi.Client {
+	client := httpapi.NewUnixClient(socket, agent)
+	r.clients = append(r.clients, client)
+	return client
+}
+
 func (r *runner) identityClient() (selectedIdentity, *httpapi.Client, error) {
 	return r.clientWithIdentity(true)
 }
@@ -1112,7 +1125,7 @@ func (r *runner) clientWithIdentity(required bool) (selectedIdentity, *httpapi.C
 	if e != nil {
 		return selected, nil, e
 	}
-	client := httpapi.NewUnixClient(socket, selected.Agent)
+	client := r.newClient(socket, selected.Agent)
 	if r.policy == policyAutoStart || r.policy == policyRestart {
 		if e = r.ensureReady(client); e != nil {
 			return selected, nil, e

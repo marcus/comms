@@ -683,7 +683,7 @@ func (r *runner) inspectStatus() (statusReport, error) {
 	if err != nil {
 		return statusReport{}, err
 	}
-	client := httpapi.NewUnixClient(socket, "")
+	client := r.newClient(socket, "")
 	hs, err := handshake(r.commandContext(), client)
 	if err != nil {
 		if httpapi.IsAutoStartableDial(err) {

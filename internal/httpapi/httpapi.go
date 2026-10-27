@@ -846,6 +846,10 @@ func NewUnixClient(socketPath, agent string) *Client {
 func NewTCPClient(baseURL, agent string) *Client {
 	return &Client{http: http.DefaultClient, baseURL: strings.TrimRight(baseURL, "/"), agent: agent}
 }
+
+// CloseIdleConnections releases connections retained for reuse by this client.
+func (c *Client) CloseIdleConnections() { c.http.CloseIdleConnections() }
+
 func (c *Client) WithAgent(agent string) *Client { copy := *c; copy.agent = agent; return &copy }
 
 func (c *Client) Do(ctx context.Context, method, path string, query url.Values, input, output any) error {
