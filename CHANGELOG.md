@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.10.0] - 2026-11-03
 
 - Add `comms react MESSAGE_ID EMOJI [--remove]` and HTTP API parity for emoji or short-label acknowledgements. Repeated additions and removals are no-ops; reactions never create messages or advance read receipts. Message reads show each reaction, its agent, and its timestamp.
 - Deliver additions and removals as separate reaction events to the original message author. `inbox`, `wait`, and `observe` opt in with `--include-reactions`; `--reactions-after` resumes the independent event cursor. Default message consumers keep their existing wake behavior.
