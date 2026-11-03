@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+- Add `comms react MESSAGE_ID EMOJI [--remove]` and HTTP API parity for emoji or short-label acknowledgements. Repeated additions and removals are no-ops; reactions never create messages or advance read receipts. Message reads show each reaction, its agent, and its timestamp.
+- Deliver additions and removals as separate reaction events to the original message author. `inbox`, `wait`, and `observe` opt in with `--include-reactions`; `--reactions-after` resumes the independent event cursor. Default message consumers keep their existing wake behavior.
+- Expire reactions and their events with the message. Add schema 6 for durable reactions and event history, with export and generated OpenAPI contracts. Upgrade client and daemon together; rollback requires a pre-upgrade database backup.
+
 ## [1.9.1] - 2026-10-27
 
 - Add fixed-participant group DMs with `send @alice @bob ...` and additive API `agents` arrays. Conversations of three to 32 participants reuse the same topic for a sorted stable-ID set; existing two-party DMs retain their keys, kind and response fields. Expose `group` kind, participant details and `topics --include-direct` discovery for members.

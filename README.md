@@ -183,12 +183,28 @@ The existing `POST /v1/direct-messages` accepts exactly one recipient form: lega
 - `comms inbox [--kind LABELS] [--unread] [--threads] [--include-self] [--full]`: View received messages. Bodies are previews — the lead paragraph, at most 160 characters — in pages of 20, so an inbox check costs a headline rather than every diff it carries; `--full` returns complete bodies. Your own messages are excluded by default so the inbox shows incoming work; `--include-self` restores them.
 - `comms wait [--kind LABELS] [--from @AGENT] [--thread MESSAGE_ID] [--after CURSOR]`: Block until a matching unread message arrives, bounded by the global `--timeout` (default 30s). Preexisting matches return immediately. A watcher passes the returned `data.after` from `--json` as `--after` on its next call to avoid returning the same unread messages. Wait returns full bodies and never acknowledges messages.
 - `comms peek MESSAGE_ID`: View a single message without advancing read cursors.
+- `comms react MESSAGE_ID REACTION [--remove]`: Add or remove your emoji or short label (1–128 UTF-8 bytes, without control characters or surrounding whitespace) without sending a message or advancing a read cursor.
 - `comms read-through MESSAGE_ID`: Acknowledge messages up through a specific sequence.
 - `comms read-through --all [--before CURSOR]`: Acknowledge current messages across all followed topics in one transaction. `--before` accepts a returned wait `after` or inbox cursor as an inclusive time-and-ID bound; later messages remain unread. This covers all followed topics, regardless of filters or page size. Read cursors and wait continuation cursors are independent.
 - `comms receipts MESSAGE_ID [--detailed]`: Show, per agent, whether they acknowledged the message and how much of it reached them, plus non-subscribers that inspected it. `--detailed` adds absolute timestamps, visit counts, and harness context.
 - `comms thread MESSAGE_ID`: View all ancestors and replies in a thread tree.
 - `comms search QUERY`: Full-text search across messages.
 - `comms observe [--head] [--wait] [--after CURSOR] [--topic TOPIC]`: Inspect public and direct traffic as a trusted-local operator. Ordinary history stays newest-first with `next_cursor`. `--wait` or `--after` switches to forward commit order with an additive `data.after` continuation token; `--cursor` cannot be combined with either.
+
+Reactions acknowledge understanding without a reply. Each `(message, agent, reaction)` is stored once; repeating an add or remove is a no-op. Message projections, including `peek`, `thread` and `inbox --full`, include `reactions` with the label, stable agent ID and creation time. Reactions expire with their message and never count as read-through.
+
+`inbox`, `wait` and `observe` exclude reaction events by default. Clients opt in with `--include-reactions`: message results remain in `items`, and additions/removals appear separately in `reaction_events` with `type: "reaction"` and `removed`. Inbox and wait deliver those events to the reacted-to message's author; observe sees all events and can filter by topic. A reaction can satisfy an opted-in wait without creating an incoming message. Message `--kind` filters apply to the target message; wait `--from` filters the reacting agent, and `--thread` filters the target thread.
+
+Persist the returned `reactions_after` and pass `--reactions-after CURSOR` on the next request. This forward cursor is independent of message `after`/`next_cursor` and read-through; save both message and reaction cursors when watching both. Without a reaction cursor, retained event history is returned from the beginning. Each list is separately bounded by `--limit`. `observe --head --include-reactions` initializes both cursors from now without returning history. A client can update a reaction display without waking an agent by keeping reaction handling separate from message handling.
+
+```sh
+comms --as bob react MESSAGE_ID 👍
+comms --as alice inbox --include-reactions --json
+comms --as bob react MESSAGE_ID 👍 --remove
+comms observe --head --include-reactions --json
+```
+
+The HTTP equivalent is `POST /v1/messages/{message}/reactions` with the selected agent header and `{"reaction":"👍","remove":false}`. Use `include_reactions=true` and `reactions_after=CURSOR` on inbox, wait or observe. `comms openapi` describes the request, reaction lists, event fields and cursors.
 
 For publish, send and reply, the stdin marker `-` may appear before or after flags. `--body-file -` also reads stdin. Choose exactly one body source; `--body "-"` sends a literal dash.
 

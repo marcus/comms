@@ -67,7 +67,7 @@ func (a *Adapter) Purge(ctx context.Context, req app.PurgeRequest, id domain.Pur
 
 func (a *Adapter) Snapshot(ctx context.Context) (_ app.Snapshot, storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
-	out := app.Snapshot{StoreID: a.storeID, Agents: []domain.Agent{}, Aliases: []app.AliasRecord{}, AgentExternalRefs: []app.ExternalAgentRefRecord{}, Topics: []domain.Topic{}, TopicExternalRefs: []app.ExternalTopicRefRecord{}, Subscriptions: []domain.Subscription{}, Messages: []domain.Message{}, Retrievals: []app.RetrievalRecord{}}
+	out := app.Snapshot{StoreID: a.storeID, Agents: []domain.Agent{}, Aliases: []app.AliasRecord{}, AgentExternalRefs: []app.ExternalAgentRefRecord{}, Topics: []domain.Topic{}, TopicExternalRefs: []app.ExternalTopicRefRecord{}, Subscriptions: []domain.Subscription{}, Messages: []domain.Message{}, Retrievals: []app.RetrievalRecord{}, ReactionEvents: []domain.ReactionEvent{}}
 	rows, e := a.read.QueryContext(ctx, "SELECT "+agentCols+" FROM agents ORDER BY id")
 	if e != nil {
 		return out, e
@@ -181,6 +181,25 @@ func (a *Adapter) Snapshot(ctx context.Context) (_ app.Snapshot, storageErr erro
 		v.LastSeenAt = timeFrom(last)
 		v.FirstInspectedAt = nullableTime(inspected)
 		out.Retrievals = append(out.Retrievals, v)
+	}
+	if e = rows.Close(); e != nil {
+		return out, e
+	}
+	rows, e = a.read.QueryContext(ctx, "SELECT "+reactionEventCols+" FROM reaction_events e JOIN messages m ON m.id=e.message_id ORDER BY e.id")
+	if e != nil {
+		return out, e
+	}
+	for rows.Next() {
+		event, err := scanReactionEvent(rows)
+		if err != nil {
+			_ = rows.Close()
+			return out, err
+		}
+		out.ReactionEvents = append(out.ReactionEvents, event)
+	}
+	if e = rows.Err(); e != nil {
+		_ = rows.Close()
+		return out, e
 	}
 	if e = rows.Close(); e != nil {
 		return out, e

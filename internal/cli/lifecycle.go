@@ -123,7 +123,7 @@ func commandPolicyOf(command string) commandPolicy {
 		return policyInspectOnly
 	case "restart":
 		return policyRestart
-	case "join", "whoami", "agents", "agent", "topic", "topics", "subscriptions", "publish", "send", "reply", "inbox", "wait", "peek", "read-through", "receipts", "thread", "search", "observe", "retention", "purge", "export":
+	case "join", "whoami", "agents", "agent", "topic", "topics", "subscriptions", "publish", "send", "reply", "react", "inbox", "wait", "peek", "read-through", "receipts", "thread", "search", "observe", "retention", "purge", "export":
 		return policyAutoStart
 	default:
 		return policyProcessLocal

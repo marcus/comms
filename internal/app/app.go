@@ -14,7 +14,7 @@ import (
 
 const (
 	ProtocolVersion             = 1
-	SchemaVersion               = 5
+	SchemaVersion               = 6
 	MaxConversationParticipants = 32
 	DefaultLimit                = 50
 	MaxLimit                    = 500
@@ -253,6 +253,8 @@ type PreparedMessage struct {
 }
 
 type MessageListRequest struct {
+	IncludeReactions bool   `json:"include_reactions,omitempty"`
+	ReactionsAfter   string `json:"reactions_after,omitempty"`
 	PageRequest
 	Kind        string `json:"kind,omitempty"`
 	Agent       string `json:"agent,omitempty"`
@@ -290,14 +292,16 @@ type AgentWaitRequest struct {
 // MessageWaitRequest awaits unread messages routed to Agent that match the
 // optional author, thread, and kind filters. Waiting never acknowledges anything.
 type MessageWaitRequest struct {
-	Agent       string        `json:"agent"`
-	Kind        string        `json:"kind,omitempty"`
-	From        string        `json:"from,omitempty"`
-	Thread      string        `json:"thread,omitempty"`
-	After       string        `json:"after,omitempty"`
-	Limit       int           `json:"limit,omitempty"`
-	IncludeSelf bool          `json:"include_self,omitempty"`
-	Timeout     time.Duration `json:"timeout,omitempty"`
+	IncludeReactions bool          `json:"include_reactions,omitempty"`
+	ReactionsAfter   string        `json:"reactions_after,omitempty"`
+	Agent            string        `json:"agent"`
+	Kind             string        `json:"kind,omitempty"`
+	From             string        `json:"from,omitempty"`
+	Thread           string        `json:"thread,omitempty"`
+	After            string        `json:"after,omitempty"`
+	Limit            int           `json:"limit,omitempty"`
+	IncludeSelf      bool          `json:"include_self,omitempty"`
+	Timeout          time.Duration `json:"timeout,omitempty"`
 }
 
 // ResolvedWait is the immutable identity a wait was resolved to once, before
@@ -314,9 +318,11 @@ type ResolvedWait struct {
 // caller passes back as After to resume without re-reading the same messages.
 // It is distinct from a subscription read cursor and acknowledges nothing.
 type MessageWaitResponse struct {
-	Items  []domain.Message `json:"items"`
-	After  string           `json:"after"`
-	Filter ResolvedWait     `json:"filter"`
+	ReactionEvents []domain.ReactionEvent `json:"reaction_events,omitempty"`
+	ReactionsAfter string                 `json:"reactions_after,omitempty"`
+	Items          []domain.Message       `json:"items"`
+	After          string                 `json:"after"`
+	Filter         ResolvedWait           `json:"filter"`
 }
 type ThreadRequest struct {
 	PageRequest
@@ -432,6 +438,8 @@ type SearchRequest struct {
 	Agent string `json:"agent,omitempty"`
 }
 type ObserveRequest struct {
+	IncludeReactions bool   `json:"include_reactions,omitempty"`
+	ReactionsAfter   string `json:"reactions_after,omitempty"`
 	PageRequest
 	Head    bool          `json:"head,omitempty"`
 	Topic   string        `json:"topic,omitempty"`
@@ -440,6 +448,8 @@ type ObserveRequest struct {
 	Timeout time.Duration `json:"-"`
 }
 type ObserveResponse struct {
+	ReactionEvents []domain.ReactionEvent `json:"reaction_events,omitempty"`
+	ReactionsAfter string                 `json:"reactions_after,omitempty"`
 	Page[domain.Message]
 	After string `json:"after,omitempty"`
 }
@@ -476,6 +486,7 @@ type ExternalTopicRefRecord struct {
 	TopicID     domain.TopicID `json:"topic_id"`
 }
 type Snapshot struct {
+	ReactionEvents    []domain.ReactionEvent   `json:"reaction_events"`
 	StoreID           string                   `json:"store_id"`
 	Agents            []domain.Agent           `json:"agents"`
 	Aliases           []AliasRecord            `json:"aliases"`
@@ -515,6 +526,8 @@ type TopicStore interface {
 	ListSubscriptions(context.Context, SubscriptionListRequest, time.Time) (Page[domain.Subscription], error)
 }
 type MessageStore interface {
+	React(context.Context, ReactRequest, time.Time) (ReactResponse, error)
+	ReactionEvents(context.Context, ReactionEventsRequest, time.Time) (ReactionEventsResponse, error)
 	Publish(context.Context, PreparedMessage) (domain.Message, error)
 	DirectSend(context.Context, PreparedMessage) (domain.Message, error)
 	Reply(context.Context, PreparedMessage) (domain.Message, error)
@@ -844,20 +857,33 @@ func (s *Service) prepareAnd(ctx context.Context, m Mutation, author, topic, par
 	}
 	return message, e
 }
-func (s *Service) Inbox(ctx context.Context, req MessageListRequest) (Page[domain.Message], error) {
+func (s *Service) Inbox(ctx context.Context, req MessageListRequest) (InboxResponse, error) {
 	if req.Agent == "" {
-		return Page[domain.Message]{}, requiredErr("agent")
+		return InboxResponse{}, requiredErr("agent")
 	}
 	if req.Limit == 0 {
 		req.Limit = InboxDefaultLimit
 	}
-	page, err := s.listMessages(ctx, req, s.messageStore.Inbox)
+	messages, err := s.listMessages(ctx, req, s.messageStore.Inbox)
+	page := InboxResponse{Page: messages}
 	if err != nil {
 		return page, err
 	}
 	agent, activityErr := s.agents.GetAgent(ctx, req.Agent, false, s.clock.Now())
 	if activityErr == nil {
 		s.activity.poll(agent.ID, s.clock.Now())
+	}
+	if req.IncludeReactions {
+		if activityErr != nil {
+			return page, activityErr
+		}
+		events, err := s.messageStore.ReactionEvents(ctx, ReactionEventsRequest{After: req.ReactionsAfter, Limit: req.Limit, AgentID: agent.ID, Kind: req.Kind, IncludeSelf: req.IncludeSelf}, s.clock.Now())
+		if err != nil {
+			return page, err
+		}
+		page.ReactionEvents, page.ReactionsAfter = events.Items, events.After
+	} else if req.ReactionsAfter != "" {
+		return page, requiredErr("include_reactions for reactions_after")
 	}
 	if req.Full {
 		s.retrievals.Observe(req.Agent, RetrievalFull, page.Items)
@@ -1003,6 +1029,9 @@ func (s *Service) WaitForAgent(ctx context.Context, req AgentWaitRequest) (domai
 // Self-authored messages do not satisfy a wait unless IncludeSelf is set,
 // matching the inbox default.
 func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (MessageWaitResponse, error) {
+	if !req.IncludeReactions && req.ReactionsAfter != "" {
+		return MessageWaitResponse{}, requiredErr("include_reactions for reactions_after")
+	}
 	if err := domain.ValidateMessageKinds(req.Kind); err != nil {
 		return MessageWaitResponse{}, err
 	}
@@ -1037,7 +1066,14 @@ func (s *Service) WaitForMessages(ctx context.Context, req MessageWaitRequest) (
 		if err != nil {
 			return MessageWaitResponse{}, err
 		}
-		if len(result.Items) != 0 {
+		if req.IncludeReactions {
+			events, err := s.messageStore.ReactionEvents(deadline, ReactionEventsRequest{After: req.ReactionsAfter, Limit: req.Limit, AgentID: resolved.AgentID, FromID: resolved.FromID, ThreadRootID: resolved.ThreadRootID, Kind: req.Kind, IncludeSelf: req.IncludeSelf}, s.clock.Now())
+			if err != nil {
+				return MessageWaitResponse{}, err
+			}
+			result.ReactionEvents, result.ReactionsAfter = events.Items, events.After
+		}
+		if len(result.Items) != 0 || len(result.ReactionEvents) != 0 {
 			result.Filter = resolved
 			s.retrievals.Observe(req.Agent, RetrievalFull, result.Items)
 			return result, nil
@@ -1133,6 +1169,12 @@ func (s *Service) Search(ctx context.Context, req SearchRequest) (Page[domain.Me
 
 // Observe shares one read-only operator stream across all agent identities.
 func (s *Service) Observe(ctx context.Context, req ObserveRequest) (ObserveResponse, error) {
+	if !req.IncludeReactions && req.ReactionsAfter != "" {
+		return ObserveResponse{}, requiredErr("include_reactions for reactions_after")
+	}
+	if req.Head && req.ReactionsAfter != "" {
+		return ObserveResponse{}, fmt.Errorf("%w: head cannot be combined with reactions_after", domain.ErrInvalid)
+	}
 	p, err := req.normalized()
 	if err != nil {
 		return ObserveResponse{}, err
@@ -1145,7 +1187,7 @@ func (s *Service) Observe(ctx context.Context, req ObserveRequest) (ObserveRespo
 		return ObserveResponse{}, fmt.Errorf("%w: --cursor cannot be combined with --wait or --after", domain.ErrInvalid)
 	}
 	if !req.Wait {
-		return s.messageStore.Observe(ctx, req, s.clock.Now())
+		return s.observeBatch(ctx, req)
 	}
 	timeout, err := normalizeWaitTimeout(req.Timeout)
 	if err != nil {
@@ -1164,14 +1206,14 @@ func (s *Service) Observe(ctx context.Context, req ObserveRequest) (ObserveRespo
 	}
 
 	for {
-		result, err := s.messageStore.Observe(deadline, req, s.clock.Now())
+		result, err := s.observeBatch(deadline, req)
 		if err != nil {
 			if deadline.Err() != nil {
 				return ObserveResponse{}, waitEnded(ctx, "no observed message arrived within "+timeout.String())
 			}
 			return ObserveResponse{}, err
 		}
-		if len(result.Items) > 0 {
+		if len(result.Items) > 0 || len(result.ReactionEvents) > 0 {
 			return result, nil
 		}
 		select {

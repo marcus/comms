@@ -232,7 +232,11 @@ func responseType(id string) reflect.Type {
 		value = app.Page[domain.Subscription]{}
 	case "message.publish", "message.direct_send", "message.reply", "message.peek":
 		value = domain.Message{}
-	case "message.inbox", "message.topic", "message.thread", "message.search":
+	case "message.react":
+		value = app.ReactResponse{}
+	case "message.inbox":
+		value = app.InboxResponse{}
+	case "message.topic", "message.thread", "message.search":
 		value = app.Page[domain.Message]{}
 	case "message.observe":
 		value = app.ObserveResponse{}
@@ -347,6 +351,10 @@ func openAPISchema(parameter Parameter) map[string]any {
 	}
 	if parameter.Name == "title" && parameter.Location == BodyParameter && !parameter.Required {
 		schema["type"] = []string{"string", "null"}
+	}
+	if parameter.Name == "reaction" && parameter.Location == BodyParameter {
+		schema["minLength"] = 1
+		schema["maxLength"] = 128
 	}
 	if parameter.Name == "kind" && parameter.Location == BodyParameter {
 		schema["maxLength"] = 64

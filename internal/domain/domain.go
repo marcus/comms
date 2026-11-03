@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/cases"
@@ -234,7 +235,43 @@ type MessageTopic struct {
 	Kind TopicKind `json:"kind"`
 }
 
+// Reaction is an annotation, not a message or a read receipt.
+type Reaction struct {
+	Reaction  string    `json:"reaction"`
+	AgentID   AgentID   `json:"agent_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ReactionEvent records one actual addition or removal in commit order.
+type ReactionEvent struct {
+	ID           int64     `json:"id"`
+	Type         string    `json:"type"`
+	MessageID    MessageID `json:"message_id"`
+	TopicID      TopicID   `json:"topic_id"`
+	ThreadRootID MessageID `json:"thread_root_id"`
+	AuthorID     AgentID   `json:"author_id"`
+	Reaction     Reaction  `json:"reaction"`
+	Removed      bool      `json:"removed"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func ValidateReaction(value string) error {
+	if err := validateUTF8("reaction", value, 128, false); err != nil {
+		return err
+	}
+	if strings.TrimSpace(value) != value || strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%w: reaction must be a nonempty emoji or short label without surrounding whitespace", ErrInvalid)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: reaction must not contain control characters", ErrInvalid)
+		}
+	}
+	return nil
+}
+
 type Message struct {
+	Reactions []Reaction `json:"reactions"`
 	// RecipientIDs is a read-time routing projection, not delivery history.
 	RecipientIDs []AgentID    `json:"recipient_ids"`
 	Topic        MessageTopic `json:"topic"`

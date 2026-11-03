@@ -29,7 +29,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 type Options struct {
 	Path            string
@@ -392,7 +392,7 @@ func (a *Adapter) Close() (storageErr error) {
 
 func (a *Adapter) Handshake(context.Context) (_ app.Handshake, storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
-	return app.Handshake{StoreID: a.storeID, ProtocolVersion: app.ProtocolVersion, SchemaVersion: schemaVersion, Capabilities: []string{"agents", "topics", "subscriptions", "messages", "direct", "group", "threads", "receipts", "search", "retention", "observe", "export"}}, nil
+	return app.Handshake{StoreID: a.storeID, ProtocolVersion: app.ProtocolVersion, SchemaVersion: schemaVersion, Capabilities: []string{"agents", "topics", "subscriptions", "messages", "direct", "group", "threads", "reactions", "receipts", "search", "retention", "observe", "export"}}, nil
 }
 
 func micros(t time.Time) int64   { return t.UTC().UnixMicro() }

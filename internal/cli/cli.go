@@ -222,6 +222,8 @@ func (r *runner) run(args []string) error {
 		return r.send(args[1:])
 	case "reply":
 		return r.reply(args[1:])
+	case "react":
+		return r.react(args[1:])
 	case "inbox":
 		return r.inbox(args[1:])
 	case "wait":
@@ -848,8 +850,25 @@ func (r *runner) messageContent(name string, args []string, titleRequired bool) 
 	return result, nil
 }
 
+func (r *runner) react(args []string) error {
+	if len(args) < 2 {
+		return usage("react requires MESSAGE_ID REACTION [--remove]")
+	}
+	fs := newFlagSet("react")
+	remove := fs.Bool("remove", false, "")
+	if err := fs.Parse(args[2:]); err != nil {
+		return usage(err.Error())
+	}
+	if fs.NArg() != 0 {
+		return usage("unexpected react arguments")
+	}
+	return r.mutate(http.MethodPost, "/v1/messages/"+url.PathEscape(args[0])+"/reactions", map[string]any{"reaction": args[1], "remove": *remove}, true)
+}
+
 func (r *runner) inbox(args []string) error {
 	fs := newFlagSet("inbox")
+	includeReactions := fs.Bool("include-reactions", false, "")
+	reactionsAfter := fs.String("reactions-after", "", "")
 	kind := fs.String("kind", "", "")
 	unread := fs.Bool("unread", false, "")
 	threads := fs.Bool("threads", false, "")
@@ -871,6 +890,8 @@ func (r *runner) inbox(args []string) error {
 	set(q, "kind", *kind)
 	setBool(q, "include_self", *includeSelf)
 	setBool(q, "full", *full)
+	setBool(q, "include_reactions", *includeReactions)
+	set(q, "reactions_after", *reactionsAfter)
 	return r.get("/v1/inbox", q, true)
 }
 
@@ -894,6 +915,8 @@ func (r *runner) waitBound() (time.Duration, error) {
 
 func (r *runner) waitMessages(args []string) error {
 	fs := newFlagSet("wait")
+	includeReactions := fs.Bool("include-reactions", false, "")
+	reactionsAfter := fs.String("reactions-after", "", "")
 	kind := fs.String("kind", "", "")
 	from := fs.String("from", "", "")
 	thread := fs.String("thread", "", "")
@@ -917,6 +940,8 @@ func (r *runner) waitMessages(args []string) error {
 	setInt(q, "limit", *limit)
 	set(q, "kind", *kind)
 	setBool(q, "include_self", *includeSelf)
+	setBool(q, "include_reactions", *includeReactions)
+	set(q, "reactions_after", *reactionsAfter)
 	return r.get("/v1/wait", q, true)
 }
 func (r *runner) oneMessageGet(args []string, suffix string) error {
@@ -980,6 +1005,8 @@ func (r *runner) search(args []string) error {
 }
 func (r *runner) observe(args []string) error {
 	fs := newFlagSet("observe")
+	includeReactions := fs.Bool("include-reactions", false, "")
+	reactionsAfter := fs.String("reactions-after", "", "")
 	head := fs.Bool("head", false, "")
 	wait := fs.Bool("wait", false, "")
 	after := fs.String("after", "", "")
@@ -993,8 +1020,8 @@ func (r *runner) observe(args []string) error {
 	if fs.NArg() != 0 {
 		return usage("unexpected observe arguments")
 	}
-	if *head && (*wait || *after != "" || *cursor != "") {
-		return usage("--head cannot be combined with --wait, --after or --cursor")
+	if *head && (*wait || *after != "" || *cursor != "" || *reactionsAfter != "") {
+		return usage("--head cannot be combined with --wait, --after, --cursor or --reactions-after")
 	}
 	if *cursor != "" && (*wait || *after != "") {
 		return usage("--cursor cannot be combined with --wait or --after")
@@ -1013,6 +1040,8 @@ func (r *runner) observe(args []string) error {
 		}
 		q.Set("timeout", bound.String())
 	}
+	setBool(q, "include_reactions", *includeReactions)
+	set(q, "reactions_after", *reactionsAfter)
 	return r.get("/v1/observe", q, false)
 }
 func (r *runner) purge(args []string) error {
@@ -1172,6 +1201,16 @@ func renderHuman(w io.Writer, value any, compact bool) error {
 					return err
 				}
 			}
+			if events, ok := v["reaction_events"].([]any); ok {
+				for _, event := range events {
+					if err := renderHuman(w, event, compact); err != nil {
+						return err
+					}
+				}
+			}
+			if cursor, _ := v["reactions_after"].(string); cursor != "" {
+				_, _ = fmt.Fprintf(w, "reactions after cursor: %s\n", cursor)
+			}
 			if cursor, _ := v["next_cursor"].(string); cursor != "" {
 				_, _ = fmt.Fprintf(w, "next cursor: %s\n", cursor)
 			}
@@ -1179,6 +1218,17 @@ func renderHuman(w io.Writer, value any, compact bool) error {
 				_, _ = fmt.Fprintf(w, "after cursor: %s\n", cursor)
 			}
 			return nil
+		}
+		if reaction, ok := v["reaction"].(map[string]any); ok {
+			action := "added"
+			if removed, _ := v["removed"].(bool); removed {
+				action = "removed"
+			}
+			if changed, ok := v["changed"].(bool); ok && !changed {
+				action = "unchanged"
+			}
+			_, err := fmt.Fprintf(w, "reaction %s: %s by %s on %s (%s)\n", action, reaction["reaction"], reaction["agent_id"], v["message_id"], reaction["created_at"])
+			return err
 		}
 		if agent, ok := v["agent"].(map[string]any); ok {
 			if err := renderHuman(w, agent, compact); err != nil {
@@ -1348,6 +1398,15 @@ func renderMessage(w io.Writer, v map[string]any, compact bool) error {
 	} else {
 		if _, err := fmt.Fprintf(w, "\n"); err != nil {
 			return err
+		}
+	}
+	if reactions, ok := v["reactions"].([]any); ok {
+		for _, raw := range reactions {
+			if reaction, ok := raw.(map[string]any); ok {
+				if _, err := fmt.Fprintf(w, "Reaction: %s by %s (%s)\n", reaction["reaction"], reaction["agent_id"], reaction["created_at"]); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

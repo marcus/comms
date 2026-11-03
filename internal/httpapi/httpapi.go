@@ -116,6 +116,7 @@ func newHandler(service *app.Service, life Lifecycle, unix bool) http.Handler {
 	mux.HandleFunc("POST /v1/messages", h.publish)
 	mux.HandleFunc("POST /v1/direct-messages", h.directSend)
 	mux.HandleFunc("POST /v1/messages/{message}/replies", h.reply)
+	mux.HandleFunc("POST /v1/messages/{message}/reactions", h.react)
 	mux.HandleFunc("GET /v1/inbox", h.inbox)
 	mux.HandleFunc("GET /v1/wait", h.waitMessages)
 	mux.HandleFunc("GET /v1/topics/{topic}/messages", h.topicMessages)
@@ -555,6 +556,22 @@ func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
 	v, e := h.app.Reply(r.Context(), app.ReplyRequest{Mutation: x.Mutation, Author: author, Parent: r.PathValue("message"), Kind: x.Kind, Title: x.Title, Body: x.Body, Expiry: exp, Metadata: x.Metadata})
 	h.respond(w, v, e)
 }
+func (h *Handler) react(w http.ResponseWriter, r *http.Request) {
+	agent, ok := h.requireAgent(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		app.Mutation
+		Reaction string `json:"reaction"`
+		Remove   bool   `json:"remove,omitempty"`
+	}
+	if !h.decode(w, r, &body) {
+		return
+	}
+	v, e := h.app.React(r.Context(), app.ReactRequest{Mutation: body.Mutation, Agent: agent, Message: r.PathValue("message"), Reaction: body.Reaction, Remove: body.Remove})
+	h.respond(w, v, e)
+}
 func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
 	agent, ok := h.requireAgent(w, r)
 	if !ok {
@@ -565,7 +582,7 @@ func (h *Handler) inbox(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, Kind: r.URL.Query().Get("kind"), UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self"), Full: boolQuery(r, "full")})
+	v, e := h.app.Inbox(r.Context(), app.MessageListRequest{PageRequest: p, Agent: agent, Kind: r.URL.Query().Get("kind"), UnreadOnly: boolQuery(r, "unread"), ThreadsOnly: boolQuery(r, "threads"), IncludeSelf: boolQuery(r, "include_self"), Full: boolQuery(r, "full"), IncludeReactions: boolQuery(r, "include_reactions"), ReactionsAfter: r.URL.Query().Get("reactions_after")})
 	h.respond(w, v, e)
 }
 func (h *Handler) waitAgent(w http.ResponseWriter, r *http.Request) {
@@ -594,14 +611,16 @@ func (h *Handler) waitMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	v, e := h.app.WaitForMessages(r.Context(), app.MessageWaitRequest{
-		Agent:       agent,
-		Kind:        query.Get("kind"),
-		From:        query.Get("from"),
-		Thread:      query.Get("thread"),
-		After:       query.Get("after"),
-		Limit:       p.Limit,
-		IncludeSelf: boolQuery(r, "include_self"),
-		Timeout:     timeout,
+		Agent:            agent,
+		Kind:             query.Get("kind"),
+		From:             query.Get("from"),
+		Thread:           query.Get("thread"),
+		After:            query.Get("after"),
+		Limit:            p.Limit,
+		IncludeSelf:      boolQuery(r, "include_self"),
+		IncludeReactions: boolQuery(r, "include_reactions"),
+		ReactionsAfter:   query.Get("reactions_after"),
+		Timeout:          timeout,
 	})
 	h.respond(w, v, e)
 }
@@ -676,7 +695,7 @@ func (h *Handler) observe(w http.ResponseWriter, r *http.Request) {
 		h.respond(w, nil, e)
 		return
 	}
-	v, e := h.app.Observe(r.Context(), app.ObserveRequest{PageRequest: p, Head: boolQuery(r, "head"), Topic: r.URL.Query().Get("topic"), Wait: boolQuery(r, "wait"), After: r.URL.Query().Get("after"), Timeout: timeout})
+	v, e := h.app.Observe(r.Context(), app.ObserveRequest{PageRequest: p, Head: boolQuery(r, "head"), Topic: r.URL.Query().Get("topic"), Wait: boolQuery(r, "wait"), After: r.URL.Query().Get("after"), Timeout: timeout, IncludeReactions: boolQuery(r, "include_reactions"), ReactionsAfter: r.URL.Query().Get("reactions_after")})
 	h.respond(w, v, e)
 }
 func (h *Handler) retention(w http.ResponseWriter, r *http.Request) {
@@ -741,6 +760,11 @@ func (h *Handler) export(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, x := range v.Messages {
 		if !write("message", x) {
+			return
+		}
+	}
+	for _, x := range v.ReactionEvents {
+		if !write("reaction_event", x) {
 			return
 		}
 	}

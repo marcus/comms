@@ -20,11 +20,11 @@ const messageCols = "id,topic_id,sequence,author_id,author_context_json,title,bo
 
 func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	var m domain.Message
-	var authorJSON, recipientsJSON string
+	var authorJSON, recipientsJSON, reactionsJSON string
 	var parent, metadata sql.NullString
 	var created int64
 	var expires sql.NullInt64
-	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName, &m.Topic.Name, &m.Topic.Kind, &recipientsJSON)
+	e := s.Scan(&m.ID, &m.TopicID, &m.Sequence, &m.AuthorID, &authorJSON, &m.Title, &m.Body, &parent, &m.ThreadRootID, &created, &expires, &metadata, &m.Kind, &m.AuthorHandle, &m.AuthorDisplayName, &m.Topic.Name, &m.Topic.Kind, &recipientsJSON, &reactionsJSON)
 	if e != nil {
 		return m, e
 	}
@@ -40,6 +40,18 @@ func scanMessage(s interface{ Scan(...any) error }) (domain.Message, error) {
 	}
 	if e = json.Unmarshal([]byte(recipientsJSON), &m.RecipientIDs); e != nil {
 		return m, e
+	}
+	var reactions []struct {
+		Reaction  string         `json:"reaction"`
+		AgentID   domain.AgentID `json:"agent_id"`
+		CreatedAt int64          `json:"created_at"`
+	}
+	if e = json.Unmarshal([]byte(reactionsJSON), &reactions); e != nil {
+		return m, e
+	}
+	m.Reactions = make([]domain.Reaction, 0, len(reactions))
+	for _, reaction := range reactions {
+		m.Reactions = append(m.Reactions, domain.Reaction{Reaction: reaction.Reaction, AgentID: reaction.AgentID, CreatedAt: timeFrom(reaction.CreatedAt)})
 	}
 	m.Topic.ID = m.TopicID
 	m.CreatedAt = timeFrom(created)
@@ -458,14 +470,22 @@ func (a *Adapter) Thread(ctx context.Context, req app.ThreadRequest, now time.Ti
 			return app.Page[domain.Message]{}, e
 		}
 		query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence<? OR (sequence=? AND id<?)) ORDER BY sequence DESC,id DESC LIMIT ?"
-		return pageMessagesLatestSequence(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
+		page, err := pageMessagesLatestSequence(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit)
+		for i := range page.Items {
+			hideExpiredReactions(&page.Items[i], now)
+		}
+		return page, err
 	}
 	seq, id, e := ascendingCursor(req.Cursor)
 	if e != nil {
 		return app.Page[domain.Message]{}, e
 	}
 	query := "SELECT " + prefixedMessageCols("messages") + " FROM messages WHERE thread_root_id=? AND EXISTS(SELECT 1 FROM messages live WHERE live.thread_root_id=? AND (live.expires_at IS NULL OR live.expires_at>?)) AND (?=0 OR sequence>? OR (sequence=? AND id>?)) ORDER BY sequence,id LIMIT ?"
-	return pageMessages(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
+	page, err := pageMessages(ctx, a.read, query, []any{m.ThreadRootID, m.ThreadRootID, micros(now), seq, seq, seq, id, req.Limit + 1}, req.Limit, false)
+	for i := range page.Items {
+		hideExpiredReactions(&page.Items[i], now)
+	}
+	return page, err
 }
 func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (_ domain.Message, storageErr error) {
 	defer func() { storageErr = translate(storageErr) }()
@@ -483,6 +503,7 @@ func (a *Adapter) Peek(ctx context.Context, ref string, now time.Time) (_ domain
 			return domain.Message{}, fmt.Errorf("%w: message %q", app.ErrNotFound, ref)
 		}
 	}
+	hideExpiredReactions(&m, now)
 	return m, nil
 }
 
@@ -774,7 +795,7 @@ func prefixedMessageCols(alias string) string {
 	for i := range parts {
 		parts[i] = alias + "." + parts[i]
 	}
-	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT name FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT kind FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT json_group_array(agent_id) FROM (SELECT s.agent_id FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=" + alias + ".topic_id AND s.unfollowed_at IS NULL AND a.retired_at IS NULL AND s.agent_id<>" + alias + ".author_id ORDER BY s.agent_id))"
+	return strings.Join(parts, ",") + ", (SELECT handle FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT display_name FROM agents WHERE agents.id=" + alias + ".author_id), (SELECT name FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT kind FROM topics WHERE topics.id=" + alias + ".topic_id), (SELECT json_group_array(agent_id) FROM (SELECT s.agent_id FROM subscriptions s JOIN agents a ON a.id=s.agent_id WHERE s.topic_id=" + alias + ".topic_id AND s.unfollowed_at IS NULL AND a.retired_at IS NULL AND s.agent_id<>" + alias + ".author_id ORDER BY s.agent_id))" + ", (SELECT json_group_array(json_object('reaction',reaction,'agent_id',agent_id,'created_at',created_at)) FROM (SELECT reaction,agent_id,created_at FROM message_reactions WHERE message_id=" + alias + ".id ORDER BY created_at,agent_id,reaction))"
 }
 func prefixedAgentCols(alias string) string {
 	parts := strings.Split(agentCols, ",")
